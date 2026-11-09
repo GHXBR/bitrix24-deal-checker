@@ -1,0 +1,10 @@
+node_modules/
+results/
+.auth/
+*.log
+.DS_Store
+Thumbs.db
+.env
+.env.*
+*.csv
+debug_*.txt

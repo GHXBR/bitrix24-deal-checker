@@ -1,0 +1,147 @@
+const readline = require('readline');
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Крутим условие, пока не станет true (или safety-timeout).
+ * Выходим сразу, как только данные появились — не «спим N секунд».
+ */
+async function waitUntil(check, { timeoutMs = 15000, intervalMs = 150, label = '' } = {}) {
+  const started = Date.now();
+  let lastErr = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      if (await check()) return true;
+    } catch (err) {
+      lastErr = err;
+      if (/closed|Target page|has been closed/i.test(String(err && err.message))) throw err;
+    }
+    await sleep(intervalMs);
+  }
+  if (label && lastErr) {
+    // тихий таймаут — вызывающий решит
+  }
+  return false;
+}
+
+function normalize(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/ё/g, 'е');
+}
+
+function parseMoney(text) {
+  if (text === null || text === undefined) return null;
+  let s = String(text).trim();
+  if (!s) return null;
+
+  s = s.replace(/₽/g, '').replace(/\bруб\.?\b/gi, '').trim();
+
+  if (/^\d{1,3}([.\s]\d{3})+(,\d+)?$/.test(s.replace(/\u00A0/g, ' '))) {
+    s = s.replace(/[\s\u00A0]/g, '').replace(/\./g, '').replace(',', '.');
+  } else if (/^\d{1,3}([,\s]\d{3})+(\.\d+)?$/.test(s.replace(/\u00A0/g, ' '))) {
+    s = s.replace(/[\s\u00A0]/g, '').replace(/,/g, '');
+  } else {
+    s = s.replace(/[\s\u00A0]/g, '').replace(',', '.');
+  }
+
+  s = s.replace(/[^\d.\-]/g, '');
+  if (!s || s === '-' || s === '.') return null;
+  const value = Number(s);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Отсекает р/с, ИНН и склейки цифр — не суммы счетов. */
+function isPlausibleMoney(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return false;
+  if (v < 1 || v >= 1e9) return false;
+  if (String(Math.trunc(Math.abs(v))).length > 9) return false;
+  if (v >= 2000 && v <= 2100 && Number.isInteger(v)) return false; // год
+  return true;
+}
+
+function amountsEqual(a, b, tolerance = 0.05) {
+  if (a === null || b === null) return false;
+  return Math.abs(a - b) <= tolerance;
+}
+
+/** Сравнение наборов сумм как мультимножества (порядок не важен). */
+function compareAmountSets(sourceAmounts, fieldAmounts, tolerance = 0.05) {
+  const left = sourceAmounts
+    .filter((n) => n !== null && Number.isFinite(n))
+    .map((n) => Number(n))
+    .filter((n) => Math.abs(n) >= 0.0001)
+    .sort((a, b) => a - b);
+  const right = fieldAmounts
+    .filter((n) => n !== null && Number.isFinite(n))
+    .map((n) => Number(n))
+    .filter((n) => Math.abs(n) >= 0.0001)
+    .sort((a, b) => a - b);
+
+  const usedRight = new Array(right.length).fill(false);
+  const missingInFields = [];
+
+  for (const src of left) {
+    let found = false;
+    for (let i = 0; i < right.length; i++) {
+      if (usedRight[i]) continue;
+      if (amountsEqual(src, right[i], tolerance)) {
+        usedRight[i] = true;
+        found = true;
+        break;
+      }
+    }
+    if (!found) missingInFields.push(src);
+  }
+
+  const extraInFields = right.filter((_, i) => !usedRight[i]);
+  const sumLeft = left.reduce((a, b) => a + b, 0);
+  const sumRight = right.reduce((a, b) => a + b, 0);
+
+  return {
+    ok: missingInFields.length === 0 && extraInFields.length === 0,
+    totalsMatch: amountsEqual(sumLeft, sumRight, Math.max(tolerance, 0.5)),
+    sumSource: sumLeft,
+    sumFields: sumRight,
+    missingInFields,
+    extraInFields,
+    sourceSorted: left,
+    fieldsSorted: right,
+  };
+}
+
+function ask(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(String(answer || '').trim());
+    });
+  });
+}
+
+function waitForEnter(message) {
+  return ask(message || 'Нажмите Enter, когда будете готовы продолжить...');
+}
+
+function formatMoney(n) {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '';
+  return String(n);
+}
+
+module.exports = {
+  sleep,
+  waitUntil,
+  normalize,
+  parseMoney,
+  isPlausibleMoney,
+  amountsEqual,
+  compareAmountSets,
+  ask,
+  waitForEnter,
+  formatMoney,
+};

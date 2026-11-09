@@ -1,0 +1,27 @@
+{
+  "name": "bitrix24-deal-checker",
+  "version": "1.0.0",
+  "description": "Проверка сделок Битрикс24 через Playwright",
+  "main": "start.js",
+  "scripts": {
+    "start": "node start.js",
+    "check": "node start.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "bitrix24",
+    "playwright",
+    "crm"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "mammoth": "^1.13.0",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.65.0",
+    "xlsx": "^0.18.5"
+  }
+}
