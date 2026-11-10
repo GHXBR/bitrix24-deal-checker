@@ -329,11 +329,10 @@ public class DealCheckerForm : Form {
       }
     };
 
-    Shown += async (s, e) => {
+    Shown += (s, e) => {
       LayoutHeader();
       AppendLog("Папка: " + appRoot);
       AppendLog("Node: " + nodePath);
-      await CheckUpdates(false);
     };
   }
 
