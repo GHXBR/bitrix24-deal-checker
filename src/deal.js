@@ -2,7 +2,17 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const config = require('../config');
-const { normalize, parseMoney, compareAmountSets, isPlausibleMoney, waitUntil, settleAfterAction } = require('./utils');
+const {
+  normalize,
+  parseMoney,
+  compareAmountSets,
+  isPlausibleMoney,
+  amountsEqual,
+  sanitizeSourceEntries,
+  formatSourceOrigins,
+  waitUntil,
+  settleAfterAction,
+} = require('./utils');
 const { extractAmountFromInvoiceFile } = require('./invoiceAmount');
 const { log, logStep, logOk, logWarn, logErr } = require('./log');
 const { saveDebugDump, collectFrameTexts } = require('./debug');
@@ -41,6 +51,37 @@ function shouldSkipClientInvoice(dealName) {
   const name = normalize(dealName).replace(/^\s+/, '');
   const prefixes = (config.skipClientInvoiceNamePrefixes || []).map((p) => normalize(p));
   return prefixes.some((p) => p && name.startsWith(p));
+}
+
+/** Из «Нал-Ю26-2900» / «QR-Ю26-97200» берём хвостовое число как сумму сделки. */
+function parseDealAmountFromTitle(dealName) {
+  const raw = String(dealName || '').trim();
+  if (!raw) return null;
+  const low = normalize(raw);
+  if (!shouldSkipClientInvoice(raw)) return null;
+  // последнее число в названии (обычно сумма): Нал-Ю26-2900 → 2900
+  const nums = raw.match(/\d+(?:[.,]\d+)?/g);
+  if (!nums || !nums.length) return null;
+  const last = parseMoney(nums[nums.length - 1]);
+  if (!isPlausibleMoney(last) || last < 100) return null;
+  // не путать с годом вроде 2026, если есть ещё одно число после
+  if (last >= 2000 && last <= 2100 && nums.length >= 2) {
+    const prev = parseMoney(nums[nums.length - 2]);
+    if (isPlausibleMoney(prev) && prev >= 100) return prev;
+  }
+  // «Ю26» даёт 26 — слишком мало, уже отсечено <100
+  if (/^нал|^qr/.test(low) && last >= 100) return last;
+  return null;
+}
+
+function resolveCashDealAmount(dealAmount, dealName, title) {
+  if (isPlausibleMoney(dealAmount) && dealAmount >= 100) return dealAmount;
+  if (config.parseDealAmountFromTitle === false) return dealAmount;
+  return (
+    parseDealAmountFromTitle(dealName) ||
+    parseDealAmountFromTitle(title) ||
+    dealAmount
+  );
 }
 
 async function readDealCardData(dealFrame, deal) {
@@ -127,9 +168,10 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   }
 
   if (!costFields.length) {
+    result.checkFailed = true;
     addIssue(
       result,
-      'не прочитались графы затрат',
+      'не удалось проверить сделку',
       'Не удалось прочитать суммы из граф затрат (Поставщик, доп. расходы, доставка): блок «Товары и маржинальность» не отрисовался'
     );
     result.details.dealName = dealName;
@@ -198,6 +240,15 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
 
   // --- 1. Счёт заказчику ---
   const skipClientInvoice = shouldSkipClientInvoice(dealName || deal.title || '');
+  const preferAmounts = costFields.map((f) => f.amount).filter((n) => n !== null);
+  const cashDealAmount = skipClientInvoice
+    ? resolveCashDealAmount(dealAmount, dealName || deal.title, deal.title)
+    : dealAmount;
+  if (skipClientInvoice && cashDealAmount !== dealAmount) {
+    log(`  сумма сделки для Нал/QR из названия: ${cashDealAmount}`);
+    result.details.dealAmountFromTitle = cashDealAmount;
+  }
+
   if (skipClientInvoice) {
     logOk('проверка: счёт заказчику не требуется (НАЛ/QR)');
     result.details.clientInvoice = { found: false, skipped: true, fileName: '', snippet: '' };
@@ -217,6 +268,12 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
           dealName ? ` (в имени файла должен быть номер сделки «${dealName}»)` : ''
         }`
       );
+    } else if (!clientInvoice.fileName && !clientInvoice.fileHref) {
+      addIssue(
+        result,
+        'нет файла счёта заказчику',
+        'Комментарий «счёт заказчику» есть, но вложение исходящего счёта не найдено'
+      );
     } else if (
       clientInvoice.fileName &&
       dealName &&
@@ -228,7 +285,46 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
         `Номер в файле счёта заказчику не совпадает со сделкой: сделка «${dealName}», файл «${clientInvoice.fileName}»`
       );
     } else {
-      logOk('проверка: счёт заказчику ок');
+      logOk('проверка: счёт заказчику найден');
+    }
+
+    if (
+      config.checkClientInvoiceAmount !== false &&
+      clientInvoice.found &&
+      (clientInvoice.fileHref || clientInvoice.fileName) &&
+      config.downloadSupplierInvoices
+    ) {
+      logStep('счёт заказчику', 'читаю сумму из исходящего файла...');
+      let invoiceAmount = null;
+      if (clientInvoice.fileHref) {
+        invoiceAmount = await downloadByHref(
+          page,
+          dealFrame,
+          clientInvoice.fileHref,
+          clientInvoice.fileName,
+          { preferAmounts: [dealAmount, ...preferAmounts].filter((n) => n != null) }
+        );
+      }
+      result.details.clientInvoice.amount = invoiceAmount;
+      if (invoiceAmount === null) {
+        addIssue(
+          result,
+          'не прочитан счёт заказчику',
+          `Не удалось прочитать сумму из файла исходящего счёта «${clientInvoice.fileName || '—'}»`
+        );
+      } else {
+        log(`  сумма в счёте заказчику = ${invoiceAmount}`);
+        const expected = isPlausibleMoney(dealAmount) ? dealAmount : null;
+        if (expected !== null && !amountsEqual(invoiceAmount, expected, config.amountTolerance)) {
+          addIssue(
+            result,
+            'не сходится счёт заказчику',
+            `Сумма в исходящем счёте заказчику (${invoiceAmount}) не совпадает с суммой сделки (${expected})`
+          );
+        } else if (expected !== null) {
+          logOk('проверка: сумма счёта заказчику = сумма сделки');
+        }
+      }
     }
   }
 
@@ -237,7 +333,9 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   const paymentTasks = await findPaymentTasksInFrame(
     dealFrame,
     config.supplierPaymentTaskHints,
-    dealName
+    dealName,
+    // у Нал/QR название сделки в карточке задачи часто не дублируется
+    { requireDealName: !skipClientInvoice }
   );
   log(`  найдено задач оплаты: ${paymentTasks.length}`);
   paymentTasks.forEach((t, i) =>
@@ -246,7 +344,7 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
     )
   );
 
-  const preferAmounts = costFields.map((f) => f.amount).filter((n) => n !== null);
+  const sourceEntries = [];
   const paymentAmounts = [];
   for (const task of paymentTasks) {
     logStep('оплата поставщику', `суммы из вложений «${task.title}»`);
@@ -264,6 +362,10 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
           title: task.title,
           amount: item.amount,
           fileName: item.fileName || '',
+        });
+        sourceEntries.push({
+          amount: item.amount,
+          origin: `счёт «${item.fileName || task.title}»`,
         });
       });
     }
@@ -294,6 +396,8 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
         'нет суммы списания',
         `В задаче «${task.title}» нет итога списания в формате «сумма …», «всего …» или «итого …» (нужна общая сумма, не цена одной позиции)`
       );
+    } else {
+      sourceEntries.push({ amount, origin: `списание «${task.title}»` });
     }
   }
   result.details.writeOffTasks = writeOffAmounts;
@@ -302,41 +406,67 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   logStep('комментарии', 'читаю ленту (СДЭК / эквайринг)...');
   const comments = await readTimelineComments(dealFrame);
   const cdekAmounts = extractCdekAmountsFromComments(comments);
-  const acquiringAmounts = shouldSkipClientInvoice(dealName || deal.title || '')
-    ? extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts)
+  for (const x of cdekAmounts) {
+    sourceEntries.push({ amount: x.amount, origin: `СДЭК «${(x.snippet || '').slice(0, 40)}»` });
+  }
+
+  const acquiringAmounts = skipClientInvoice
+    ? extractAcquiringFeesFromComments(comments, cashDealAmount, preferAmounts)
     : [];
+  for (const x of acquiringAmounts) {
+    sourceEntries.push({
+      amount: x.amount,
+      origin: x.fromField ? 'эквайринг 3% (из графы)' : 'эквайринг 3% (расчёт)',
+    });
+  }
   result.details.commentAmounts = { cdek: cdekAmounts, acquiring: acquiringAmounts };
   if (cdekAmounts.length) {
     log(`  СДЭК из комментариев: ${cdekAmounts.map((x) => x.amount).join(', ')}`);
   }
   if (acquiringAmounts.length) {
     log(
-      `  эквайринг 3% от суммы сделки (${dealAmount}): ${acquiringAmounts.map((x) => x.amount).join(', ')}` +
-        (acquiringAmounts[0]?.snapped ? ' (подогнано под графу ±1₽)' : '')
+      `  эквайринг 3% от ${cashDealAmount}: ${acquiringAmounts.map((x) => x.amount).join(', ')}` +
+        (acquiringAmounts[0]?.fromField ? ' (взято из графы)' : '') +
+        (acquiringAmounts[0]?.snapped ? ' (±1₽)' : '')
     );
+  } else if (skipClientInvoice) {
+    logWarn(`  эквайринг 3% не найден (база суммы сделки: ${cashDealAmount ?? '—'})`);
   }
 
   // --- 4. Сверка сумм (порядок не важен) ---
-  const sourceAmounts = [
-    ...paymentAmounts.map((x) => x.amount),
-    ...writeOffAmounts.map((x) => x.amount),
-    ...cdekAmounts.map((x) => x.amount),
-    ...acquiringAmounts.map((x) => x.amount),
-  ].filter((n) => isPlausibleMoney(n));
-
   const fieldAmounts = costFields
     .map((f) => f.amount)
     .filter((n) => n !== null && Math.abs(n) >= 0.0001);
 
+  const { kept, dropped } = sanitizeSourceEntries(sourceEntries, fieldAmounts, {
+    minSourceAmount: config.minSourceAmount,
+    tolerance: config.amountTolerance,
+    dropTinyOrphans: config.dropTinyOrphans,
+    orphanMaxAmount: config.orphanMaxAmount,
+    orphanMaxRatio: config.orphanMaxRatio,
+  });
+  if (dropped.length) {
+    logWarn(
+      `  отброшены сомнительные суммы: ${dropped
+        .map((d) => `${d.amount} (${d.reason}; ${d.origin || '?'})`)
+        .join('; ')}`
+    );
+  }
+
+  const sourceAmounts = kept.map((e) => e.amount);
+  result.details.sourceEntries = kept;
+  result.details.sourceDropped = dropped;
   result.details.sourceAmounts = sourceAmounts;
+  result.details.sourceOrigins = formatSourceOrigins(kept);
   result.details.fieldAmounts = fieldAmounts;
 
   logStep(
     'сверка',
-    `задачи ${JSON.stringify([...sourceAmounts].sort((a, b) => a - b))} ↔ графы ${JSON.stringify(
+    `источники ${JSON.stringify([...sourceAmounts].sort((a, b) => a - b))} ↔ графы ${JSON.stringify(
       [...fieldAmounts].sort((a, b) => a - b)
     )}`
   );
+  if (kept.length) log(`  происхождение: ${formatSourceOrigins(kept)}`);
 
   if (!sourceAmounts.length && !fieldAmounts.length) {
     logWarn('источников и граф затрат нет — сверку пропускаю');
@@ -361,13 +491,13 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
       addIssue(
         result,
         'не сходится сумма в счёте поставщику и в списке затрат',
-        `В счетах и задачах есть суммы [${cmp.sourceSorted.join(', ')}], а список затрат пустой`
+        `В счетах и задачах есть суммы [${cmp.sourceSorted.join(', ')}], а список затрат пустой. Источники: ${formatSourceOrigins(kept)}`
       );
     } else if (!sourceAmounts.length && fieldAmounts.length) {
       addIssue(
         result,
         'не сходится сумма в счёте поставщику и в списке затрат',
-        `В списке затрат есть суммы [${cmp.fieldsSorted.join(', ')}], а в счетах поставщика, предоплате, постоплате и списании таких сумм нет`
+        `В списке затрат есть суммы [${cmp.fieldsSorted.join(', ')}], а в счетах поставщика, предоплате, постоплате, списании и эквайринге таких сумм нет`
       );
     } else {
       const parts = [];
@@ -385,7 +515,7 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
         addIssue(
           result,
           'не сходится сумма в счёте поставщику и в списке затрат',
-          `Не сходится сумма: ${parts.join('; ')}. Счета и задачи: [${cmp.sourceSorted.join(', ')}], список затрат: [${cmp.fieldsSorted.join(', ')}]`
+          `Не сходится сумма: ${parts.join('; ')}. Источники: ${formatSourceOrigins(kept)}; список затрат: [${cmp.fieldsSorted.join(', ')}]`
         );
       }
     }
@@ -785,7 +915,8 @@ function extractCdekAmountsFromComments(comments) {
     while ((m = nearCdek.exec(raw)) !== null) {
       const rawNum = m[1] || m[2];
       const v = parseMoney(rawNum);
-      if (!isPlausibleMoney(v) || v < 10) continue;
+      const minCdek = Number(config.minSourceAmount) || 50;
+      if (!isPlausibleMoney(v) || v < minCdek) continue;
       const key = String(v);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -797,7 +928,8 @@ function extractCdekAmountsFromComments(comments) {
       const moneyRe = new RegExp(moneyToken, 'g');
       while ((m = moneyRe.exec(raw)) !== null) {
         const v = parseMoney(m[1]);
-        if (!isPlausibleMoney(v) || v < 10) continue;
+        const minCdek = Number(config.minSourceAmount) || 50;
+        if (!isPlausibleMoney(v) || v < minCdek) continue;
         const key = String(v);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -809,68 +941,86 @@ function extractCdekAmountsFromComments(comments) {
   return out;
 }
 
-/**
- * НАЛ/QR: в комментарии намёк на эквайринг / 3% →
- * в сверку идёт 3% от суммы сделки. Если в графе есть сумма в пределах ±1 ₽ —
- * берём её (округление Битрикса).
- */
-function extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts = []) {
-  const pct = Number(config.acquiringFeePercent) || 3;
-  if (!isPlausibleMoney(dealAmount)) return [];
-
+function acquiringCommentHit(comments) {
   const regexes = [
     ...(config.acquiringCommentRegexes || []),
     config.acquiringCommentRegex,
   ].filter(Boolean);
 
-  let matchedSnippet = '';
   for (const raw of comments || []) {
     const text = String(raw || '');
     if (!text) continue;
-    if (regexes.some((re) => re.test(text))) {
-      matchedSnippet = text.slice(0, 160);
-      break;
-    }
-    // ещё мягче: «3%» + «эквайр» / «терминал» / «картой» в одном комментарии
+    if (regexes.some((re) => re.test(text))) return text.slice(0, 160);
     const low = normalize(text);
     if (
       /3\s*%/.test(low) &&
-      (low.includes('эквайр') || low.includes('терминал') || low.includes('картой') || low.includes('безнал'))
+      (low.includes('эквайр') ||
+        low.includes('терминал') ||
+        low.includes('картой') ||
+        low.includes('безнал'))
     ) {
-      matchedSnippet = text.slice(0, 160);
-      break;
+      return text.slice(0, 160);
     }
   }
-  if (!matchedSnippet) return [];
+  return '';
+}
 
-  let fee = Math.round(dealAmount * (pct / 100) * 100) / 100;
-  // альтернативные округления, которые любит Битрикс
-  const variants = [
-    fee,
-    Math.round(dealAmount * (pct / 100)),
-    Math.floor(dealAmount * (pct / 100) * 100) / 100,
-    Math.ceil(dealAmount * (pct / 100) * 100) / 100,
+function acquiringFeeVariants(dealAmount, pct) {
+  const raw = dealAmount * (pct / 100);
+  return [
+    Math.round(raw * 100) / 100,
+    Math.round(raw),
+    Math.floor(raw * 100) / 100,
+    Math.ceil(raw * 100) / 100,
   ];
+}
+
+/**
+ * НАЛ/QR: 3% от суммы сделки.
+ * 1) если в графе уже лежит ≈3% — берём её (даже без комментария);
+ * 2) иначе, если есть комментарий про эквайринг — считаем 3%.
+ */
+function extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts = []) {
+  const pct = Number(config.acquiringFeePercent) || 3;
+  if (!isPlausibleMoney(dealAmount) || dealAmount < 100) return [];
 
   const tol = Math.max(Number(config.amountTolerance) || 0, 1);
   const prefers = (preferAmounts || []).filter((n) => Number.isFinite(n));
-  let snapped = false;
-  if (prefers.length) {
-    let best = null;
-    let bestDist = Infinity;
-    for (const v of variants) {
-      for (const p of prefers) {
-        const d = Math.abs(v - p);
-        if (d <= tol && d < bestDist) {
-          best = p;
-          bestDist = d;
-        }
+  const variants = acquiringFeeVariants(dealAmount, pct);
+  const matchedSnippet = acquiringCommentHit(comments);
+
+  let fieldHit = null;
+  let bestDist = Infinity;
+  for (const v of variants) {
+    for (const p of prefers) {
+      const d = Math.abs(v - p);
+      if (d <= tol && d < bestDist) {
+        fieldHit = p;
+        bestDist = d;
       }
     }
-    if (best !== null) {
-      fee = best;
-      snapped = true;
-    }
+  }
+
+  // Главный путь для Нал/QR: графа уже содержит 3%
+  if (fieldHit !== null && config.acquiringMatchFromCostFields !== false) {
+    return [
+      {
+        amount: fieldHit,
+        base: dealAmount,
+        snapped: true,
+        fromField: true,
+        snippet: matchedSnippet || `3% от ${dealAmount} = ${fieldHit} (из графы)`,
+      },
+    ];
+  }
+
+  if (!matchedSnippet) return [];
+
+  let fee = variants[0];
+  let snapped = false;
+  if (fieldHit !== null) {
+    fee = fieldHit;
+    snapped = true;
   }
 
   if (!isPlausibleMoney(fee)) return [];
@@ -880,7 +1030,8 @@ function extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts = 
       amount: fee,
       base: dealAmount,
       snapped,
-      snippet: matchedSnippet || '3% за эквайринг от суммы сделки',
+      fromField: false,
+      snippet: matchedSnippet,
     },
   ];
 }

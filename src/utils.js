@@ -76,6 +76,57 @@ function isPlausibleMoney(v) {
   return true;
 }
 
+/**
+ * Чистит суммы-источники: мелочь из PDF и «сироты» без пары в графах.
+ * entries: [{ amount, origin }]
+ */
+function sanitizeSourceEntries(entries, fieldAmounts, opts = {}) {
+  const minAmount = Number(opts.minSourceAmount);
+  const min = Number.isFinite(minAmount) ? minAmount : 50;
+  const tol = Number.isFinite(opts.tolerance) ? opts.tolerance : 1;
+  const dropOrphans = opts.dropTinyOrphans !== false;
+  const orphanMax = Number.isFinite(opts.orphanMaxAmount) ? opts.orphanMaxAmount : 200;
+  const orphanRatio = Number.isFinite(opts.orphanMaxRatio) ? opts.orphanMaxRatio : 0.05;
+
+  const fields = (fieldAmounts || []).filter((n) => Number.isFinite(n));
+  const list = (entries || []).filter((e) => e && isPlausibleMoney(e.amount));
+  const maxRef = Math.max(0, ...fields, ...list.map((e) => e.amount));
+
+  const kept = [];
+  const dropped = [];
+
+  for (const entry of list) {
+    const a = Number(entry.amount);
+    const matchesField = fields.some((f) => Math.abs(f - a) <= tol);
+    if (matchesField) {
+      kept.push(entry);
+      continue;
+    }
+    if (a < min) {
+      dropped.push({ ...entry, reason: `ниже минимума ${min}` });
+      continue;
+    }
+    if (dropOrphans && maxRef > 0 && a <= orphanMax && a < maxRef * orphanRatio) {
+      dropped.push({ ...entry, reason: 'мелкая сирота без пары в графах' });
+      continue;
+    }
+    kept.push(entry);
+  }
+
+  return { kept, dropped };
+}
+
+function formatSourceOrigins(entries) {
+  return (entries || [])
+    .map((e) => {
+      const amount = Number.isFinite(e.amount) ? String(e.amount) : '';
+      const origin = String(e.origin || '').trim();
+      return origin ? `${amount} ← ${origin}` : amount;
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
 function amountsEqual(a, b, tolerance = 0.05) {
   if (a === null || b === null) return false;
   return Math.abs(a - b) <= tolerance;
@@ -152,6 +203,8 @@ module.exports = {
   normalize,
   parseMoney,
   isPlausibleMoney,
+  sanitizeSourceEntries,
+  formatSourceOrigins,
   amountsEqual,
   compareAmountSets,
   ask,

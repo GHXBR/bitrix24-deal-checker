@@ -36,7 +36,7 @@ function isGuiMode() {
 async function main() {
   const guiMode = isGuiMode();
   info('Проверка сделок Битрикс24 (только чтение, ничего не меняет)');
-  info('Сборка: 2026-11-10d (GUI + обновления)');
+  info('Сборка: 2026-11-10e (фильтр мусора, Нал/QR, счёт заказчику, происхождение сумм)');
   if (config.verbose) info('Подробные логи включены (config.verbose / VERBOSE=1)');
 
   let reportUrl = readReportUrlFromArgs();
@@ -130,6 +130,7 @@ async function main() {
         title: deal.title,
         url: deal.url,
         ok: false,
+        checkFailed: true,
         errors: [detail],
         issues: [{ comment, detail }],
         details: {},

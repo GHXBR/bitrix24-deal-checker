@@ -52,8 +52,22 @@ function formatDetails(result) {
 
 function clientInvoiceText(r) {
   if (r.details?.clientInvoice?.skipped) return 'не требуется';
-  if (r.details?.clientInvoice?.found) return 'да';
+  if (r.details?.clientInvoice?.found) {
+    const amount = r.details.clientInvoice.amount;
+    return amount != null ? `да (${formatMoney(amount)})` : 'да';
+  }
   return 'нет';
+}
+
+function statusText(r) {
+  if (r.ok) return 'OK';
+  if (r.checkFailed) return 'НЕ УДАЛОСЬ ПРОВЕРИТЬ';
+  return 'НУЖНО ИСПРАВИТЬ';
+}
+
+function sourceText(r) {
+  if (r.details?.sourceOrigins) return r.details.sourceOrigins;
+  return (r.details?.sourceAmounts || []).map(formatMoney).join(', ');
 }
 
 function buildCsvContent(results) {
@@ -78,12 +92,12 @@ function buildCsvContent(results) {
         r.id,
         r.details?.dealName || r.title,
         r.url,
-        r.ok ? 'OK' : 'НУЖНО ИСПРАВИТЬ',
+        statusText(r),
         r.ok ? '' : formatComment(r),
         r.details?.closeMonth || '',
         clientInvoiceText(r),
         r.details?.clientInvoice?.fileName || '',
-        (r.details?.sourceAmounts || []).map(formatMoney).join(', '),
+        sourceText(r),
         (r.details?.fieldAmounts || []).map(formatMoney).join(', '),
         r.ok ? '' : formatDetails(r),
       ]
@@ -103,11 +117,12 @@ function buildFixRows(results) {
       id: r.id,
       name: r.details?.dealName || r.title || '',
       url: r.url || '',
+      status: statusText(r),
       comment: formatComment(r) || 'нужно исправить',
       detail: formatDetails(r) || 'Детали замечания не разобраны',
       closeMonth: r.details?.closeMonth || '',
       clientInvoice: clientInvoiceText(r),
-      sourceAmounts: (r.details?.sourceAmounts || []).map(formatMoney).join(', '),
+      sourceAmounts: sourceText(r),
       fieldAmounts: (r.details?.fieldAmounts || []).map(formatMoney).join(', '),
     });
   }
@@ -119,13 +134,13 @@ function buildAllRows(results) {
     id: r.id,
     name: r.details?.dealName || r.title || '',
     url: r.url || '',
-    status: r.ok ? 'OK' : 'НУЖНО ИСПРАВИТЬ',
+    status: statusText(r),
     comment: r.ok ? '' : formatComment(r),
     detail: r.ok ? '' : formatDetails(r),
     closeMonth: r.details?.closeMonth || '',
     clientInvoice: clientInvoiceText(r),
     invoiceFile: r.details?.clientInvoice?.fileName || '',
-    sourceAmounts: (r.details?.sourceAmounts || []).map(formatMoney).join(', '),
+    sourceAmounts: sourceText(r),
     fieldAmounts: (r.details?.fieldAmounts || []).map(formatMoney).join(', '),
   }));
 }
@@ -142,10 +157,11 @@ function writeExcel(results, { final = false } = {}) {
           ID: r.id,
           Название: r.name,
           Ссылка: r.url,
+          Статус: r.status,
           Комментарий: r.comment,
           'Месяц завершения': r.closeMonth,
           'Счёт заказчику': r.clientInvoice,
-          'Суммы из задач': r.sourceAmounts,
+          'Откуда суммы': r.sourceAmounts,
           'Суммы в графах': r.fieldAmounts,
           Подробно: r.detail,
         }))
@@ -154,10 +170,11 @@ function writeExcel(results, { final = false } = {}) {
             ID: '',
             Название: 'Проблемных сделок нет',
             Ссылка: '',
+            Статус: '',
             Комментарий: '',
             'Месяц завершения': '',
             'Счёт заказчику': '',
-            'Суммы из задач': '',
+            'Откуда суммы': '',
             'Суммы в графах': '',
             Подробно: '',
           },
@@ -174,24 +191,25 @@ function writeExcel(results, { final = false } = {}) {
       'Месяц завершения': r.closeMonth,
       'Счёт заказчику': r.clientInvoice,
       'Файл счёта': r.invoiceFile,
-      'Суммы из задач': r.sourceAmounts,
+      'Откуда суммы': r.sourceAmounts,
       'Суммы в графах': r.fieldAmounts,
       Подробно: r.detail,
     }))
   );
 
+  const failed = results.filter((r) => r.checkFailed).length;
   const summarySheet = XLSX.utils.aoa_to_sheet([
     ['Проверка сделок Битрикс24'],
     ['Дата', new Date().toLocaleString('ru-RU')],
     ['Всего сделок', results.length],
     ['OK', results.filter((r) => r.ok).length],
-    ['Нужно исправить', results.filter((r) => !r.ok).length],
+    ['Нужно исправить', results.filter((r) => !r.ok && !r.checkFailed).length],
+    ['Не удалось проверить', failed],
     ['Сделок с замечаниями', fixRows.length],
     [],
+    ['Колонка «Откуда суммы» — происхождение каждой суммы (счёт / списание / эквайринг).'],
     ['Колонка «Комментарий» — коротко, что не так.'],
     ['Последняя колонка «Подробно» — какие суммы и поля не сошлись.'],
-    ['Лист «Нужно исправить» — одна строка = одна сделка.'],
-    ['Лист «Все сделки» — полный список проверенных сделок.'],
   ]);
 
   // ширины колонок для удобного чтения в Excel
@@ -199,24 +217,25 @@ function writeExcel(results, { final = false } = {}) {
     { wch: 10 },
     { wch: 28 },
     { wch: 42 },
-    { wch: 52 },
+    { wch: 20 },
+    { wch: 40 },
     { wch: 18 },
-    { wch: 16 },
-    { wch: 28 },
-    { wch: 28 },
+    { wch: 18 },
+    { wch: 48 },
+    { wch: 24 },
     { wch: 72 },
   ];
   allSheet['!cols'] = [
     { wch: 10 },
     { wch: 28 },
     { wch: 42 },
+    { wch: 20 },
+    { wch: 40 },
     { wch: 18 },
-    { wch: 52 },
     { wch: 18 },
-    { wch: 16 },
     { wch: 36 },
-    { wch: 28 },
-    { wch: 28 },
+    { wch: 48 },
+    { wch: 24 },
     { wch: 72 },
   ];
 
@@ -279,22 +298,35 @@ function printDealIssues(result) {
 }
 
 function printSummary(results) {
-  const bad = results.filter((r) => !r.ok);
+  const bad = results.filter((r) => !r.ok && !r.checkFailed);
+  const failed = results.filter((r) => r.checkFailed);
   const good = results.filter((r) => r.ok);
 
   console.log('\n—— Итог ——');
-  console.log(`Всего: ${results.length} | OK: ${good.length} | Исправить: ${bad.length}`);
+  console.log(
+    `Всего: ${results.length} | OK: ${good.length} | Исправить: ${bad.length} | Не проверено: ${failed.length}`
+  );
 
   if (!bad.length) {
     console.log('Все проверенные сделки в порядке.\n');
     return;
   }
 
-  console.log('\nПроблемные сделки:');
-  for (const r of bad) {
-    console.log(`\n[#${r.id}] ${r.details?.dealName || r.title} — ${formatComment(r)}`);
-    console.log(`  ${r.url}`);
-    printDealIssues(r);
+  if (bad.length) {
+    console.log('\nПроблемные сделки:');
+    for (const r of bad) {
+      console.log(`\n[#${r.id}] ${r.details?.dealName || r.title} — ${formatComment(r)}`);
+      console.log(`  ${r.url}`);
+      printDealIssues(r);
+    }
+  }
+  if (failed.length) {
+    console.log('\nНе удалось проверить:');
+    for (const r of failed) {
+      console.log(`\n[#${r.id}] ${r.details?.dealName || r.title} — ${formatComment(r)}`);
+      console.log(`  ${r.url}`);
+      printDealIssues(r);
+    }
   }
   console.log('');
 }

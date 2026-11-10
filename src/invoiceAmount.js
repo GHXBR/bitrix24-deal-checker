@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const config = require('../config');
 const { parseMoney, normalize, isPlausibleMoney, amountsEqual } = require('./utils');
 
 /**
@@ -173,27 +174,28 @@ function isTotalLabel(label) {
 }
 
 function pickBestAmount(labeled, amounts, strongLabeled = [], preferAmounts = []) {
-  const S = strongLabeled.filter(isPlausibleMoney);
-  const L = labeled.filter(isPlausibleMoney);
+  const min = Number(config.minSourceAmount);
+  const minAmt = Number.isFinite(min) ? min : 50;
+  const tol = Number(config.amountTolerance);
+  const matchTol = Number.isFinite(tol) ? Math.max(tol, 0.05) : 1;
+
+  const bigEnough = (n) => isPlausibleMoney(n) && n >= minAmt;
+  const S = strongLabeled.filter(bigEnough);
+  const L = labeled.filter(bigEnough);
+  // сырые числа без ярлыка — только для поиска совпадения с графой, не как итог «наугад»
   const A = amounts.filter(isPlausibleMoney);
   const pool = [...S, ...L, ...A];
 
   // Если в счёте есть сумма из графы затрат — это почти наверняка нужный итог
   for (const prefer of preferAmounts || []) {
-    const hit = pool.find((a) => amountsEqual(a, prefer, 0.05));
-    if (hit !== undefined) return hit;
+    const hit = pool.find((a) => amountsEqual(a, prefer, matchTol));
+    if (hit !== undefined) return prefer;
   }
 
   if (S.length) return Math.max(...S);
+  if (L.length) return Math.max(...L);
 
-  if (L.length) {
-    const fromLabel = Math.max(...L);
-    const fromAll = A.length ? Math.max(...A) : fromLabel;
-    if (fromAll > fromLabel * 1.2) return fromAll;
-    return fromLabel;
-  }
-
-  if (A.length) return Math.max(...A);
+  // Без ярлыка «итого/сумма» не берём случайный max из PDF — оттуда рождаются «18» и мусор
   return null;
 }
 
