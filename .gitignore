@@ -4,6 +4,8 @@ results/
 .browser-profile/
 runtime/
 .update-tmp/
+.update-pending.json
+*.pending
 .app-version.json
 *.log
 .DS_Store

@@ -465,9 +465,24 @@ public class DealCheckerForm : Form {
 
       AppendLog("Устанавливаю обновление...");
       SetStatus("Устанавливаю", "run");
-      string applyJson = await RunNodeJson("\"" + Path.Combine(appRoot, "scripts", "update-cli.js") + "\" apply");
+      string applyJson = await RunNodeJson(
+        "\"" + Path.Combine(appRoot, "scripts", "update-cli.js") + "\" apply",
+        true
+      );
       AppendLog(applyJson);
-      SetStatus("Обновлено", "ok");
+      bool needsRestart = ExtractJsonRaw(applyJson, "needsRestart") == "true";
+      SetStatus(needsRestart ? "Нужен перезапуск" : "Обновлено", needsRestart ? "warn" : "ok");
+      if (needsRestart) {
+        MessageBox.Show(
+          this,
+          "Обновление скачано. Приложение сейчас закроется и откроется снова с новой версией.",
+          "Обновления",
+          MessageBoxButtons.OK,
+          MessageBoxIcon.Information
+        );
+        Application.Exit();
+        return;
+      }
       MessageBox.Show(this, "Обновление установлено. Можно продолжать работу.", "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Information);
     } catch (Exception ex) {
       AppendLog("Ошибка обновления: " + ex.Message);
@@ -527,7 +542,7 @@ public class DealCheckerForm : Form {
     return json.Substring(start, end - start).Trim().ToLowerInvariant();
   }
 
-  Task<string> RunNodeJson(string args) {
+  Task<string> RunNodeJson(string args, bool forUpdateApply = false) {
     return Task.Run(() => {
       var psi = new ProcessStartInfo();
       psi.FileName = nodePath;
@@ -539,6 +554,9 @@ public class DealCheckerForm : Form {
       psi.RedirectStandardError = true;
       psi.StandardOutputEncoding = Encoding.UTF8;
       psi.StandardErrorEncoding = Encoding.UTF8;
+      if (forUpdateApply) {
+        psi.EnvironmentVariables["UPDATE_HOST_PID"] = Process.GetCurrentProcess().Id.ToString();
+      }
       var p = Process.Start(psi);
       string stdout = p.StandardOutput.ReadToEnd();
       string stderr = p.StandardError.ReadToEnd();

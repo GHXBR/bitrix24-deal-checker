@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { createWriteStream } = require('fs');
 const { pipeline } = require('stream/promises');
 
@@ -188,30 +188,104 @@ Expand-Archive -LiteralPath '${zipPath.replace(/'/g, "''")}' -DestinationPath '$
   }
 }
 
+function isBusyError(err) {
+  const code = err && err.code;
+  return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+}
+
+function copyFileReplace(from, to, pending) {
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  try {
+    fs.copyFileSync(from, to);
+  } catch (err) {
+    if (!isBusyError(err)) throw err;
+    const pendingPath = to + '.pending';
+    fs.copyFileSync(from, pendingPath);
+    pending.push({ from: pendingPath, to });
+  }
+}
+
 function copyUpdatedTree(srcRoot, destRoot) {
+  const pending = [];
   const entries = fs.readdirSync(srcRoot, { withFileTypes: true });
   for (const entry of entries) {
     if (KEEP_NAMES.has(entry.name)) continue;
     const from = path.join(srcRoot, entry.name);
     const to = path.join(destRoot, entry.name);
     if (entry.isDirectory()) {
-      fs.rmSync(to, { recursive: true, force: true });
-      copyDirRecursive(from, to);
+      // Не сносим целиком занятые каталоги — копируем поверх.
+      copyDirRecursive(from, to, pending);
     } else {
-      fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.copyFileSync(from, to);
+      copyFileReplace(from, to, pending);
     }
   }
+  return pending;
 }
 
-function copyDirRecursive(src, dest) {
+function copyDirRecursive(src, dest, pending) {
   fs.mkdirSync(dest, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     const from = path.join(src, entry.name);
     const to = path.join(dest, entry.name);
-    if (entry.isDirectory()) copyDirRecursive(from, to);
-    else fs.copyFileSync(from, to);
+    if (entry.isDirectory()) copyDirRecursive(from, to, pending);
+    else copyFileReplace(from, to, pending);
   }
+}
+
+function schedulePendingReplace(root, pending, relaunchExe) {
+  if (!pending.length) return;
+  const listPath = path.join(root, '.update-pending.json');
+  fs.writeFileSync(listPath, JSON.stringify({ pending, relaunchExe }, null, 2), 'utf8');
+
+  // Ждём закрытия GUI (UPDATE_HOST_PID), а не только node-процесса обновления.
+  const hostPid = Number(process.env.UPDATE_HOST_PID || 0) || Number(process.ppid || 0) || 0;
+
+  const ps = `
+$ErrorActionPreference = 'SilentlyContinue'
+$hostPid = ${hostPid}
+$nodePid = ${process.pid}
+Start-Sleep -Milliseconds 500
+if ($nodePid -gt 0) { try { Wait-Process -Id $nodePid -Timeout 60 } catch {} }
+if ($hostPid -gt 0) { try { Wait-Process -Id $hostPid -Timeout 300 } catch {} }
+Start-Sleep -Milliseconds 900
+$root = '${root.replace(/'/g, "''")}'
+$listPath = Join-Path $root '.update-pending.json'
+if (-not (Test-Path $listPath)) { exit 0 }
+$data = Get-Content -LiteralPath $listPath -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($item in $data.pending) {
+  $from = [string]$item.from
+  $to = [string]$item.to
+  if (Test-Path -LiteralPath $from) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+    for ($i = 0; $i -lt 20; $i++) {
+      try {
+        Move-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop
+        break
+      } catch {
+        Start-Sleep -Milliseconds 400
+      }
+    }
+  }
+}
+Remove-Item -LiteralPath $listPath -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath $root -Filter '*.pending' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+$relaunch = [string]$data.relaunchExe
+if ($relaunch -and (Test-Path -LiteralPath $relaunch)) {
+  Start-Process -FilePath $relaunch -WorkingDirectory $root
+}
+`;
+
+  const child = spawn(
+    'powershell',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', ps],
+    {
+      cwd: root,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    }
+  );
+  child.unref();
 }
 
 function findExtractedRoot(extractDir) {
@@ -247,7 +321,7 @@ async function applyUpdate({ onProgress } = {}) {
 
   const packageBefore = safeRead(path.join(root, 'package-lock.json'));
   say('Копирую файлы (профиль браузера и отчёты сохраняются)...');
-  copyUpdatedTree(srcRoot, root);
+  const pending = copyUpdatedTree(srcRoot, root);
   const packageAfter = safeRead(path.join(root, 'package-lock.json'));
 
   writeLocalMeta({
@@ -271,9 +345,24 @@ async function applyUpdate({ onProgress } = {}) {
     }
   }
 
+  // Архив с exe больше не нужен; .pending файлы уже лежат в корне приложения.
   fs.rmSync(tmp, { recursive: true, force: true });
-  say('Обновление установлено.');
-  return { updated: true, ...status };
+
+  const needsRestart = pending.length > 0;
+  if (needsRestart) {
+    const relaunchExe = path.join(root, 'Проверка сделок.exe');
+    say('Часть файлов занята (приложение запущено). Они подменятся после перезапуска.');
+    schedulePendingReplace(root, pending, relaunchExe);
+  } else {
+    say('Обновление установлено.');
+  }
+
+  return {
+    updated: true,
+    needsRestart,
+    pendingCount: pending.length,
+    ...status,
+  };
 }
 
 function safeRead(file) {
