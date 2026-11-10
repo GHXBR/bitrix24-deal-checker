@@ -470,19 +470,15 @@ public class DealCheckerForm : Form {
         true
       );
       AppendLog(applyJson);
-      bool needsRestart = ExtractJsonRaw(applyJson, "needsRestart") == "true";
-      SetStatus(needsRestart ? "Нужен перезапуск" : "Обновлено", needsRestart ? "warn" : "ok");
-      if (needsRestart) {
-        MessageBox.Show(
-          this,
-          "Обновление скачано. Приложение сейчас закроется и откроется снова с новой версией.",
-          "Обновления",
-          MessageBoxButtons.OK,
-          MessageBoxIcon.Information
-        );
-        Application.Exit();
+      bool updated = ExtractJsonRaw(applyJson, "updated") == "true";
+      if (updated) {
+        AppendLog("Перезапуск...");
+        SetStatus("Перезапуск", "run");
+        // Закрываем сразу: фоновый скрипт дождётся выхода, подменит exe и откроет приложение снова.
+        BeginInvoke(new Action(() => Application.Exit()));
         return;
       }
+      SetStatus("Актуально", "ok");
       MessageBox.Show(this, "Обновление установлено. Можно продолжать работу.", "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Information);
     } catch (Exception ex) {
       AppendLog("Ошибка обновления: " + ex.Message);

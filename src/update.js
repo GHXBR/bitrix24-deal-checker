@@ -193,8 +193,17 @@ function isBusyError(err) {
   return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
 }
 
+const DEFER_EXE_NAMES = new Set(['Проверка сделок.exe', 'Установить.exe']);
+
 function copyFileReplace(from, to, pending) {
   fs.mkdirSync(path.dirname(to), { recursive: true });
+  // Запущенный exe нельзя перезаписать — всегда откладываем до перезапуска.
+  if (DEFER_EXE_NAMES.has(path.basename(to))) {
+    const pendingPath = to + '.pending';
+    fs.copyFileSync(from, pendingPath);
+    pending.push({ from: pendingPath, to });
+    return;
+  }
   try {
     fs.copyFileSync(from, to);
   } catch (err) {
@@ -232,44 +241,49 @@ function copyDirRecursive(src, dest, pending) {
   }
 }
 
-function schedulePendingReplace(root, pending, relaunchExe) {
-  if (!pending.length) return;
+function scheduleRestart(root, pending, relaunchExe) {
   const listPath = path.join(root, '.update-pending.json');
-  fs.writeFileSync(listPath, JSON.stringify({ pending, relaunchExe }, null, 2), 'utf8');
+  fs.writeFileSync(
+    listPath,
+    JSON.stringify({ pending: pending || [], relaunchExe: relaunchExe || '' }, null, 2),
+    'utf8'
+  );
 
-  // Ждём закрытия GUI (UPDATE_HOST_PID), а не только node-процесса обновления.
+  // Ждём закрытия GUI (UPDATE_HOST_PID), затем подменяем exe и запускаем снова.
   const hostPid = Number(process.env.UPDATE_HOST_PID || 0) || Number(process.ppid || 0) || 0;
 
   const ps = `
 $ErrorActionPreference = 'SilentlyContinue'
 $hostPid = ${hostPid}
 $nodePid = ${process.pid}
-Start-Sleep -Milliseconds 500
+Start-Sleep -Milliseconds 400
 if ($nodePid -gt 0) { try { Wait-Process -Id $nodePid -Timeout 60 } catch {} }
 if ($hostPid -gt 0) { try { Wait-Process -Id $hostPid -Timeout 300 } catch {} }
-Start-Sleep -Milliseconds 900
+Start-Sleep -Milliseconds 700
 $root = '${root.replace(/'/g, "''")}'
 $listPath = Join-Path $root '.update-pending.json'
-if (-not (Test-Path $listPath)) { exit 0 }
-$data = Get-Content -LiteralPath $listPath -Raw -Encoding UTF8 | ConvertFrom-Json
-foreach ($item in $data.pending) {
-  $from = [string]$item.from
-  $to = [string]$item.to
-  if (Test-Path -LiteralPath $from) {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
-    for ($i = 0; $i -lt 20; $i++) {
-      try {
-        Move-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop
-        break
-      } catch {
-        Start-Sleep -Milliseconds 400
+$relaunch = '${String(relaunchExe || '').replace(/'/g, "''")}'
+if (Test-Path -LiteralPath $listPath) {
+  $data = Get-Content -LiteralPath $listPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($data.relaunchExe) { $relaunch = [string]$data.relaunchExe }
+  foreach ($item in @($data.pending)) {
+    $from = [string]$item.from
+    $to = [string]$item.to
+    if ($from -and $to -and (Test-Path -LiteralPath $from)) {
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+      for ($i = 0; $i -lt 30; $i++) {
+        try {
+          Move-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop
+          break
+        } catch {
+          Start-Sleep -Milliseconds 350
+        }
       }
     }
   }
+  Remove-Item -LiteralPath $listPath -Force -ErrorAction SilentlyContinue
 }
-Remove-Item -LiteralPath $listPath -Force -ErrorAction SilentlyContinue
 Get-ChildItem -LiteralPath $root -Filter '*.pending' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-$relaunch = [string]$data.relaunchExe
 if ($relaunch -and (Test-Path -LiteralPath $relaunch)) {
   Start-Process -FilePath $relaunch -WorkingDirectory $root
 }
@@ -345,21 +359,16 @@ async function applyUpdate({ onProgress } = {}) {
     }
   }
 
-  // Архив с exe больше не нужен; .pending файлы уже лежат в корне приложения.
+  // Архив больше не нужен; .pending для exe уже в корне приложения.
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  const needsRestart = pending.length > 0;
-  if (needsRestart) {
-    const relaunchExe = path.join(root, 'Проверка сделок.exe');
-    say('Часть файлов занята (приложение запущено). Они подменятся после перезапуска.');
-    schedulePendingReplace(root, pending, relaunchExe);
-  } else {
-    say('Обновление установлено.');
-  }
+  const relaunchExe = path.join(root, 'Проверка сделок.exe');
+  say('Обновление готово. Перезапускаю приложение...');
+  scheduleRestart(root, pending, relaunchExe);
 
   return {
     updated: true,
-    needsRestart,
+    needsRestart: true,
     pendingCount: pending.length,
     ...status,
   };
