@@ -107,18 +107,25 @@ function Get-LocalRepoRoot {
 
 function Save-AppVersionMeta([string]$appDir) {
   try {
-    $commit = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/commits/$Branch" -Headers @{
+    # Atom-лента — без лимита GitHub API
+    $atom = Invoke-WebRequest -Uri "https://github.com/$Repo/commits/$Branch.atom" -UseBasicParsing -Headers @{
       'User-Agent' = 'bitrix24-deal-checker-installer'
-      Accept       = 'application/vnd.github+json'
+      Accept       = 'application/atom+xml'
     }
+    $xml = [xml]$atom.Content
+    $entry = $xml.feed.entry | Select-Object -First 1
+    $sha = ''
+    if ($entry.id -match 'Commit/([0-9a-f]{7,40})') { $sha = $Matches[1] }
+    elseif ($entry.link.href -match '/commit/([0-9a-f]{7,40})') { $sha = $Matches[1] }
+    if (-not $sha) { throw 'SHA не найден в atom' }
     $meta = @{
-      commit      = [string]$commit.sha
+      commit      = $sha
       installedAt = (Get-Date).ToString('o')
-      message     = ([string]$commit.commit.message -split "`n")[0]
-      date        = [string]$commit.commit.committer.date
+      message     = [string]$entry.title
+      date        = [string]$entry.updated
     }
     $meta | ConvertTo-Json | Set-Content -Path (Join-Path $appDir '.app-version.json') -Encoding UTF8
-    Write-Log ("Версия: {0}" -f $meta.commit.Substring(0, 7))
+    Write-Log ("Версия: {0}" -f $meta.commit.Substring(0, [Math]::Min(7, $meta.commit.Length)))
   } catch {
     Write-Log ("Не удалось записать версию: {0}" -f $_.Exception.Message)
   }

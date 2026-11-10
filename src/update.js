@@ -44,19 +44,19 @@ function writeLocalMeta(meta) {
   fs.writeFileSync(metaPath(), JSON.stringify(meta, null, 2), 'utf8');
 }
 
-function httpsGetJson(url) {
+function httpsGetText(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
       {
         headers: {
           'User-Agent': 'bitrix24-deal-checker',
-          Accept: 'application/vnd.github+json',
+          ...headers,
         },
       },
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          httpsGetJson(res.headers.location).then(resolve, reject);
+          httpsGetText(res.headers.location, headers).then(resolve, reject);
           return;
         }
         let data = '';
@@ -65,20 +65,56 @@ function httpsGetJson(url) {
           data += chunk;
         });
         res.on('end', () => {
-          if (res.statusCode !== 200) {
-            reject(new Error(`GitHub API ${res.statusCode}: ${data.slice(0, 200)}`));
+          if (res.statusCode === 403 || res.statusCode === 429) {
+            reject(
+              new Error(
+                'GitHub временно ограничил запросы с этого IP. Подождите около часа или нажмите «Обновления» позже.'
+              )
+            );
             return;
           }
-          try {
-            resolve(JSON.parse(data));
-          } catch (err) {
-            reject(err);
+          if (res.statusCode !== 200) {
+            reject(new Error(`Не удалось связаться с GitHub (HTTP ${res.statusCode}).`));
+            return;
           }
+          resolve(data);
         });
       }
     );
     req.on('error', reject);
   });
+}
+
+function parseAtomHead(xml) {
+  const entry = xml.match(/<entry\b[\s\S]*?<\/entry>/i);
+  if (!entry) throw new Error('Не удалось прочитать ленту коммитов GitHub.');
+  const block = entry[0];
+  const id =
+    (block.match(/<id>\s*tag:github\.com,2008:Grit::Commit\/([0-9a-f]{7,40})\s*<\/id>/i) || [])[1] ||
+    (block.match(/\/commit\/([0-9a-f]{7,40})/i) || [])[1] ||
+    '';
+  if (!id) throw new Error('Не удалось определить версию на GitHub.');
+  const titleRaw = ((block.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '').trim();
+  const message = titleRaw
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const date = ((block.match(/<updated>\s*([^<]+)\s*<\/updated>/i) || [])[1] || '').trim();
+  return {
+    commit: id.slice(0, 40),
+    message: message || 'Обновление с GitHub',
+    date,
+  };
+}
+
+async function httpsGetJson(url) {
+  const data = await httpsGetText(url, { Accept: 'application/vnd.github+json' });
+  try {
+    return JSON.parse(data);
+  } catch (err) {
+    throw new Error('Некорректный ответ GitHub API.');
+  }
 }
 
 function httpsDownload(url, dest) {
@@ -104,12 +140,24 @@ function httpsDownload(url, dest) {
 }
 
 async function fetchRemoteHead() {
-  const data = await httpsGetJson(`https://api.github.com/repos/${REPO}/commits/${BRANCH}`);
-  return {
-    commit: String(data.sha || '').slice(0, 40),
-    message: String((data.commit && data.commit.message) || '').split('\n')[0],
-    date: (data.commit && data.commit.committer && data.commit.committer.date) || '',
-  };
+  // Atom-лента не использует лимит GitHub API (60 req/час без токена).
+  try {
+    const xml = await httpsGetText(`https://github.com/${REPO}/commits/${BRANCH}.atom`, {
+      Accept: 'application/atom+xml, application/xml, text/xml, */*',
+    });
+    return parseAtomHead(xml);
+  } catch (atomErr) {
+    try {
+      const data = await httpsGetJson(`https://api.github.com/repos/${REPO}/commits/${BRANCH}`);
+      return {
+        commit: String(data.sha || '').slice(0, 40),
+        message: String((data.commit && data.commit.message) || '').split('\n')[0],
+        date: (data.commit && data.commit.committer && data.commit.committer.date) || '',
+      };
+    } catch {
+      throw atomErr;
+    }
+  }
 }
 
 async function checkForUpdates() {
