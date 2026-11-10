@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const config = require('../config');
-const { normalize, parseMoney, compareAmountSets, isPlausibleMoney, waitUntil } = require('./utils');
+const { normalize, parseMoney, compareAmountSets, isPlausibleMoney, waitUntil, settleAfterAction } = require('./utils');
 const { extractAmountFromInvoiceFile } = require('./invoiceAmount');
 const { log, logStep, logOk, logWarn, logErr } = require('./log');
 const { saveDebugDump, collectFrameTexts } = require('./debug');
@@ -28,13 +28,12 @@ const {
  * Проверка одной сделки. В Битрикс ничего не пишет — только читает и сверяет.
  */
 
-function addIssue(result, problem, fix) {
-  if (result.issues.some((i) => i.problem === problem)) return;
+function addIssue(result, comment, detail) {
+  if (result.issues.some((i) => i.detail === detail)) return;
   result.ok = false;
-  result.issues.push({ problem, fix });
-  result.errors.push(`${problem} → ${fix}`);
-  log(`не так: ${problem}`);
-  log(`исправить: ${fix}`);
+  result.issues.push({ comment, detail });
+  result.errors.push(detail);
+  log(`${comment}: ${detail}`);
 }
 
 /** НАЛ… / QR… — счёт заказчику не нужен. */
@@ -87,18 +86,26 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   result.details.frameUrl = dealFrame.url();
 
   logStep('поля', 'жду месяц...');
-  await waitForDealFields(dealFrame, 20000);
+  await waitForDealFields(dealFrame, config.dealFieldsTimeoutMs || 20000);
 
   // дальше только после реальных сумм в графах затрат (не «не заполнено»)
   logStep('поля', 'жду суммы Поставщик / расходы...');
-  let costsReady = await waitForCostAmounts(dealFrame, config.costFieldLabels, 30000);
+  let costsReady = await waitForCostAmounts(
+    dealFrame,
+    config.costFieldLabels,
+    config.costAmountsTimeoutMs || 30000
+  );
 
   if (!costsReady) {
     // iframe мог пересоздаться — перехватываем и ждём ещё
     logWarn('суммы не появились — перечитываю iframe');
-    const live = await resolveDealFrame(page, deal.url, 10000);
+    const live = await resolveDealFrame(page, deal.url, config.dealOpenTimeoutMs || 10000);
     if (live) dealFrame = live;
-    costsReady = await waitForCostAmounts(dealFrame, config.costFieldLabels, 20000);
+    costsReady = await waitForCostAmounts(
+      dealFrame,
+      config.costFieldLabels,
+      config.costRetryTimeoutMs || 20000
+    );
   }
 
   logStep('поля', 'читаю карточку...');
@@ -107,7 +114,11 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   if (!costFields.length) {
     // последний шанс: ещё раз expand + wait + read
     await expandEditorSections(dealFrame);
-    costsReady = await waitForCostAmounts(dealFrame, config.costFieldLabels, 15000);
+    costsReady = await waitForCostAmounts(
+      dealFrame,
+      config.costFieldLabels,
+      config.costLastChanceTimeoutMs || 15000
+    );
     const again = await readDealCardData(dealFrame, deal);
     dealName = again.dealName || dealName;
     closeMonth = again.closeMonth || closeMonth;
@@ -118,8 +129,8 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   if (!costFields.length) {
     addIssue(
       result,
-      'Не удалось прочитать суммы из граф затрат (Поставщик / доп.расходы / доставка) — блок не отрисовался',
-      'Откройте сделку вручную, раскройте «Товары и маржинальность» и перезапустите проверку'
+      'не прочитались графы затрат',
+      'Не удалось прочитать суммы из граф затрат (Поставщик, доп. расходы, доставка): блок «Товары и маржинальность» не отрисовался'
     );
     result.details.dealName = dealName;
     result.details.closeMonth = closeMonth;
@@ -129,15 +140,21 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   }
 
   logStep('таймлайн', 'жду ленту...');
-  await waitForTimelineReady(dealFrame, 12000);
+  await waitForTimelineReady(dealFrame, config.timelineTimeoutMs || 12000);
   await scrollTimelineInFrame(dealFrame, config.timelineScrollSteps || 4);
 
-  const diag = await dumpFrameDiagnostics(dealFrame);
-  log(
-    `  iframe diag: len=${diag.len}, titles=${diag.titleCount}, stream=${diag.streamCount}, ` +
-      `о_сделке=${diag.hasAbout}, месяц=${diag.hasMonth}, поставщик=${diag.hasSupplier}, ` +
-      `счёт=${diag.hasInvoice}, предоплата=${diag.hasPrepay}`
-  );
+  const wantDiag =
+    config.frameDiagnostics || config.verbose || process.env.DEBUG_DIAG === '1' || process.env.VERBOSE === '1';
+  const diag = wantDiag
+    ? await dumpFrameDiagnostics(dealFrame)
+    : { hasAbout: true, hasMonth: true };
+  if (wantDiag) {
+    log(
+      `  iframe diag: len=${diag.len}, titles=${diag.titleCount}, stream=${diag.streamCount}, ` +
+        `о_сделке=${diag.hasAbout}, месяц=${diag.hasMonth}, поставщик=${diag.hasSupplier}, ` +
+        `счёт=${diag.hasInvoice}, предоплата=${diag.hasPrepay}`
+    );
+  }
 
   log(`  название = «${dealName || '—'}»`);
   log(closeMonth ? `  месяц = «${closeMonth}»` : '  месяц пустой / не найден');
@@ -172,8 +189,8 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   if (!closeMonth) {
     addIssue(
       result,
-      `Не заполнено поле «${config.closeMonthLabel}»`,
-      `Откройте блок «О сделке» → заполните «${config.closeMonthLabel}» (например «2026 октябрь») и сохраните`
+      'не заполнен месяц завершения',
+      `Не заполнено поле «${config.closeMonthLabel}» в блоке «О сделке»`
     );
   } else {
     logOk('проверка: месяц завершения заполнен');
@@ -195,8 +212,10 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
     if (!clientInvoice.found) {
       addIssue(
         result,
-        'Нет комментария «счёт заказчику» с вложенным файлом счёта',
-        `В ленте сделки добавьте комментарий с текстом «счёт заказчику» и прикрепите файл исходящего счёта (в имени файла должен быть номер сделки${dealName ? ` «${dealName}»` : ''})`
+        'нет счёта заказчику',
+        `В ленте нет комментария «счёт заказчику» с вложенным файлом исходящего счёта${
+          dealName ? ` (в имени файла должен быть номер сделки «${dealName}»)` : ''
+        }`
       );
     } else if (
       clientInvoice.fileName &&
@@ -205,8 +224,8 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
     ) {
       addIssue(
         result,
-        `Номер в файле счёта заказчику не совпадает со сделкой: сделка «${dealName}», файл «${clientInvoice.fileName}»`,
-        `Замените вложенный файл на счёт, в имени которого есть номер сделки «${dealName}»`
+        'не тот счёт заказчику',
+        `Номер в файле счёта заказчику не совпадает со сделкой: сделка «${dealName}», файл «${clientInvoice.fileName}»`
       );
     } else {
       logOk('проверка: счёт заказчику ок');
@@ -235,8 +254,8 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
     if (!amounts.length) {
       addIssue(
         result,
-        `В задаче «${task.title}» не удалось прочитать суммы из файлов счетов поставщика`,
-        `Откройте задачу «${task.title}», проверьте вложения счетов (Excel/PDF/Word) с итоговой суммой; при необходимости замените файлы`
+        'не прочитан счёт поставщику',
+        `В задаче «${task.title}» не удалось прочитать итоговую сумму из вложенных счетов поставщика (Excel, PDF или Word)`
       );
     } else {
       amounts.forEach((item) => {
@@ -252,25 +271,28 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   result.details.paymentTasks = paymentAmounts;
 
   // --- 3. Списание со склада ---
-  logStep('списание', `ищу задачи «${config.warehouseTaskHint}»`);
-  const writeOffTasks = await findPaymentTasksInFrame(
-    dealFrame,
-    [config.warehouseTaskHint],
-    dealName
-  );
+  const warehouseHints =
+    config.warehouseTaskHints && config.warehouseTaskHints.length
+      ? config.warehouseTaskHints
+      : [config.warehouseTaskHint].filter(Boolean);
+  logStep('списание', `ищу задачи: ${warehouseHints.join(', ')}`);
+  const writeOffTasks = await findPaymentTasksInFrame(dealFrame, warehouseHints, dealName, {
+    // в карточке списания название сделки часто не дублируется
+    requireDealName: false,
+  });
   log(`  найдено задач списания: ${writeOffTasks.length}`);
 
   const writeOffAmounts = [];
   for (const task of writeOffTasks) {
     logStep('списание', `ищу «сумма/всего …» — «${task.title}»`);
-    const amount = await extractWarehouseAmount(page, dealFrame, task);
+    const amount = await extractWarehouseAmount(page, dealFrame, task, preferAmounts);
     log(amount !== null ? `  сумма списания = ${amount}` : '  сумма/всего не найдены');
     writeOffAmounts.push({ title: task.title, amount });
     if (amount === null) {
       addIssue(
         result,
-        `В задаче «${task.title}» нет суммы в формате «сумма …» или «всего …»`,
-        `Откройте задачу «${task.title}» и укажите итог списания так: «сумма 297.99» или «всего 297.99» (не цену одной позиции)`
+        'нет суммы списания',
+        `В задаче «${task.title}» нет итога списания в формате «сумма …», «всего …» или «итого …» (нужна общая сумма, не цена одной позиции)`
       );
     }
   }
@@ -281,7 +303,7 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   const comments = await readTimelineComments(dealFrame);
   const cdekAmounts = extractCdekAmountsFromComments(comments);
   const acquiringAmounts = shouldSkipClientInvoice(dealName || deal.title || '')
-    ? extractAcquiringFeesFromComments(comments, dealAmount)
+    ? extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts)
     : [];
   result.details.commentAmounts = { cdek: cdekAmounts, acquiring: acquiringAmounts };
   if (cdekAmounts.length) {
@@ -289,7 +311,8 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   }
   if (acquiringAmounts.length) {
     log(
-      `  эквайринг 3% от суммы сделки (${dealAmount}): ${acquiringAmounts.map((x) => x.amount).join(', ')}`
+      `  эквайринг 3% от суммы сделки (${dealAmount}): ${acquiringAmounts.map((x) => x.amount).join(', ')}` +
+        (acquiringAmounts[0]?.snapped ? ' (подогнано под графу ±1₽)' : '')
     );
   }
 
@@ -337,28 +360,32 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
     } else if (sourceAmounts.length && !fieldAmounts.length) {
       addIssue(
         result,
-        `В задачах есть суммы [${cmp.sourceSorted.join(', ')}], а графы затрат пустые (или не прочитались)`,
-        `Проверьте блок «Товары и маржинальность»: суммы ${cmp.sourceSorted.join(', ')} должны быть в Поставщик / доп.расходы / доставка`
+        'не сходится сумма в счёте поставщику и в списке затрат',
+        `В счетах и задачах есть суммы [${cmp.sourceSorted.join(', ')}], а список затрат пустой`
       );
     } else if (!sourceAmounts.length && fieldAmounts.length) {
       addIssue(
         result,
-        `В графах затрат есть [${cmp.fieldsSorted.join(', ')}], но нет сумм из задач «Предоплата»/«Постоплата»/«Списание»`,
-        `Добавьте задачи оплаты/списания на эти суммы — или очистите лишние графы`
+        'не сходится сумма в счёте поставщику и в списке затрат',
+        `В списке затрат есть суммы [${cmp.fieldsSorted.join(', ')}], а в счетах поставщика, предоплате, постоплате и списании таких сумм нет`
       );
     } else {
+      const parts = [];
       if (cmp.missingInFields.length) {
-        addIssue(
-          result,
-          `Суммы из задач не найдены в графах затрат: ${cmp.missingInFields.join(', ')}. Задачи: [${cmp.sourceSorted.join(', ')}], графы: [${cmp.fieldsSorted.join(', ')}]`,
-          `В «Товары и маржинальность» должна быть каждая из сумм ${cmp.missingInFields.join(', ')} (любая графа, любой порядок)`
+        parts.push(
+          `в списке затрат нет сумм из счетов и задач: ${cmp.missingInFields.join(', ')}`
         );
       }
       if (cmp.extraInFields.length) {
+        parts.push(
+          `в списке затрат есть суммы, которых нет в счетах и задачах: ${cmp.extraInFields.join(', ')}`
+        );
+      }
+      if (parts.length) {
         addIssue(
           result,
-          `В графах затрат есть суммы без задачи-источника: ${cmp.extraInFields.join(', ')}. Задачи: [${cmp.sourceSorted.join(', ')}], графы: [${cmp.fieldsSorted.join(', ')}]`,
-          `Уберите лишние ${cmp.extraInFields.join(', ')} или добавьте задачи/счета с этими суммами`
+          'не сходится сумма в счёте поставщику и в списке затрат',
+          `Не сходится сумма: ${parts.join('; ')}. Счета и задачи: [${cmp.sourceSorted.join(', ')}], список затрат: [${cmp.fieldsSorted.join(', ')}]`
         );
       }
     }
@@ -525,72 +552,216 @@ async function tryDownloadAndParseAllInPanel(page, parseOpts = {}) {
   return out;
 }
 
-async function extractWarehouseAmount(page, dealFrame, task) {
-  const fromCard = extractWriteOffAmountFromText(task.sectionText || task.fingerprint || '');
+async function extractWarehouseAmount(page, dealFrame, task, preferAmounts = []) {
+  // Текст описания почти всегда только внутри открытой задачи —
+  // превью в ленте часто без «сумма/всего» или с одной «ценой».
+  let found = null;
+
+  if (await openTask(page, dealFrame, task)) {
+    await waitUntil(
+      async () => {
+        const chunks = await collectTaskBodyTexts(page);
+        for (const chunk of chunks) {
+          const amount = extractWriteOffAmountFromText(chunk, preferAmounts);
+          if (amount !== null) {
+            found = amount;
+            log(`  сумма списания из текста задачи: ${amount}`);
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeoutMs: 12000, intervalMs: 250 }
+    );
+    await closeSidePanel(page);
+  } else {
+    logWarn('  задачу списания не открыл — пробую текст из ленты');
+  }
+
+  if (found !== null) return found;
+
+  const fromCard = extractWriteOffAmountFromText(
+    task.sectionText || task.fingerprint || '',
+    preferAmounts
+  );
   if (fromCard !== null) {
     log(`  сумма списания из ленты: ${fromCard}`);
     return fromCard;
   }
+  return null;
+}
 
-  if (!(await openTask(page, dealFrame, task))) {
-    logWarn('  задачу списания не открыл');
+/** Собираем текст описания задачи (не весь DOM портала). */
+async function collectTaskBodyTexts(page) {
+  const chunks = [];
+
+  const grab = async (ctx) => {
+    try {
+      const parts = await ctx.evaluate(() => {
+        const out = [];
+        const push = (t) => {
+          const s = String(t || '')
+            .replace(/\u00A0/g, ' ')
+            .replace(/[ \t]+/g, ' ')
+            .trim();
+          if (s.length >= 3) out.push(s);
+        };
+
+        const sels = [
+          '.task-detail-description',
+          '.task-detail-description-text',
+          '[class*="task-detail-description"]',
+          '.tasks-frame-view-description',
+          '[data-bx-id*="description"]',
+          '.task-detail-content',
+          '.task-public-content',
+          '.ui-editor-content-block',
+          '.tasks-task-view-description',
+          '.side-panel-content-container .task-detail',
+          '.side-panel-content .task-detail',
+        ];
+        for (const sel of sels) {
+          for (const el of document.querySelectorAll(sel)) push(el.innerText || el.textContent || '');
+        }
+
+        // если спец. блоков нет — весь контент панели задачи
+        if (!out.length) {
+          const panel =
+            document.querySelector(
+              '.side-panel-content-container, .side-panel-content, .task-detail, [class*="side-panel"]'
+            ) || document.body;
+          push(panel?.innerText || '');
+        }
+        return out;
+      });
+      chunks.push(...parts);
+    } catch {
+      // ignore
+    }
+  };
+
+  await grab(page);
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const url = frame.url() || '';
+    if (!/task|IFRAME|SIDE_SLIDER/i.test(url) && !/about:blank/i.test(url)) continue;
+    await grab(frame);
+  }
+
+  // уникальные куски, сначала более короткие описания (меньше мусора)
+  const uniq = [];
+  const seen = new Set();
+  for (const c of chunks.sort((a, b) => a.length - b.length)) {
+    const key = c.slice(0, 200);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(c);
+  }
+  return uniq;
+}
+
+/**
+ * Из текста задачи списания: только «сумма» / «всего» (+ «на сумму»).
+ * «Цена» и строки только с ценой позиции — игнорируем.
+ * Важно: в JS \\b не работает с кириллицей — границы через класс букв.
+ */
+function extractWriteOffAmountFromText(text, preferAmounts = []) {
+  const raw = String(text || '').replace(/\u00A0/g, ' ');
+  if (!raw.trim()) return null;
+
+  const moneyTok =
+    config.warehouseMoneyToken ||
+    '([0-9]{1,3}(?:[\\s\\u00A0][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+[.,][0-9]{1,2}|[0-9]{1,9}(?:[.,][0-9]{1,2})?)';
+  // граница «слова» для кириллицы
+  const B = '(?:^|[^0-9A-Za-zА-Яа-яЁё])';
+  const E = '(?=[^0-9A-Za-zА-Яа-яЁё]|$)';
+
+  const labeled = [
+    new RegExp(
+      `${B}всего${E}\\s*(?:к\\s*(?:оплате|списанию)|по\\s*списанию|списан[оа]?)?\\s*[:\\-=]?\\s*${moneyTok}`,
+      'gi'
+    ),
+    new RegExp(
+      `${B}сумма${E}\\s*(?:списания|итого|общая|к\\s*списанию)?\\s*[:\\-=]?\\s*${moneyTok}`,
+      'gi'
+    ),
+    new RegExp(`${B}на\\s+сумму\\s*[:\\-=]?\\s*${moneyTok}`, 'gi'),
+    new RegExp(`(?:^|[\\n\\r;|/])\\s*(?:сумма|всего)\\s*[:\\-=]?\\s*${moneyTok}`, 'gi'),
+  ];
+
+  const candidates = [];
+  const seen = new Set();
+
+  const push = (v) => {
+    if (!isPlausibleMoney(v)) return;
+    const key = String(Math.round(v * 100) / 100);
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(v);
+  };
+
+  const isPriceContext = (around) => {
+    const low = String(around || '').toLowerCase().replace(/ё/g, 'е');
+    const hasPrice = new RegExp(`${B}цена${E}`, 'i').test(low);
+    const hasSum =
+      new RegExp(`${B}сумма${E}`, 'i').test(low) ||
+      new RegExp(`${B}всего${E}`, 'i').test(low) ||
+      /на\s+сумму/i.test(low);
+    return hasPrice && !hasSum;
+  };
+
+  for (const re of labeled) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+      const start = Math.max(0, m.index - 16);
+      const end = Math.min(raw.length, m.index + m[0].length + 8);
+      if (isPriceContext(raw.slice(start, end))) continue;
+      push(parseMoney(m[1]));
+    }
+  }
+
+  // построчно: только строки, где есть сумма/всего
+  for (const line of raw.split(/\r?\n|;|\u2028|\u2029/)) {
+    const low = line.toLowerCase().replace(/ё/g, 'е');
+    const hasSum =
+      new RegExp(`${B}сумма${E}`, 'i').test(low) ||
+      new RegExp(`${B}всего${E}`, 'i').test(low) ||
+      /на\s+сумму/i.test(low);
+    if (!hasSum) continue;
+    if (isPriceContext(low)) continue;
+
+    const re = new RegExp(`(?:сумма|всего|на\\s+сумму)[^0-9]{0,24}${moneyTok}`, 'gi');
+    let m;
+    while ((m = re.exec(line)) !== null) {
+      if (/цена/i.test(m[0]) && !/(сумма|всего)/i.test(m[0])) continue;
+      push(parseMoney(m[1]));
+    }
+  }
+
+  if (!candidates.length) {
+    if (config.verbose) logWarn('  в тексте задачи нет «сумма»/«всего» с числом (цена игнорируется)');
     return null;
   }
 
-  // ждём появления текста с суммой/всего в панели (не sleep)
-  let found = null;
-  await waitUntil(
-    async () => {
-      for (const frame of page.frames()) {
-        try {
-          const t = await frame.evaluate(() => document.body?.innerText || '');
-          if (!t || t.length < 20) continue;
-          const amount = extractWriteOffAmountFromText(t);
-          if (amount !== null) {
-            found = amount;
-            return true;
-          }
-        } catch {
-          // ignore
+  const tol = Math.max(Number(config.amountTolerance) || 0, 1);
+  const prefers = (preferAmounts || []).filter((n) => Number.isFinite(n));
+  if (prefers.length) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const c of candidates) {
+      for (const p of prefers) {
+        const d = Math.abs(c - p);
+        if (d <= tol && d < bestDist) {
+          best = p;
+          bestDist = d;
         }
       }
-      const text = await page.evaluate(() => {
-        const panel =
-          document.querySelector(
-            '.side-panel-content, .side-panel, [class*="side-panel"], .task-detail'
-          ) || document.body;
-        return panel.innerText || '';
-      });
-      const amount = extractWriteOffAmountFromText(text);
-      if (amount !== null) {
-        found = amount;
-        return true;
-      }
-      return false;
-    },
-    { timeoutMs: 12000, intervalMs: 250 }
-  );
-
-  await closeSidePanel(page);
-  return found;
-}
-
-/** Для списания: «сумма» / «всего» / «итого», не цена позиции. */
-function extractWriteOffAmountFromText(text) {
-  const s = String(text || '');
-  const patterns = config.warehouseAmountRegexes || [];
-  let best = null;
-  for (const re of patterns) {
-    const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
-    const globalRe = new RegExp(re.source, flags);
-    let m;
-    while ((m = globalRe.exec(s)) !== null) {
-      const v = parseMoney(m[1]);
-      if (!isPlausibleMoney(v)) continue;
-      if (best === null || v > best) best = v;
     }
+    if (best !== null) return best;
   }
-  return best;
+
+  return candidates.reduce((a, b) => (a > b ? a : b), candidates[0]);
 }
 
 /** СДЭК / транспорт из комментариев → [{ amount, snippet }]. */
@@ -639,25 +810,77 @@ function extractCdekAmountsFromComments(comments) {
 }
 
 /**
- * НАЛ/QR: в комментарии есть «3% за эквайринг» →
- * в сверку идёт 3% от суммы сделки (в графе Поставщик эта сумма уже лежит готовой).
+ * НАЛ/QR: в комментарии намёк на эквайринг / 3% →
+ * в сверку идёт 3% от суммы сделки. Если в графе есть сумма в пределах ±1 ₽ —
+ * берём её (округление Битрикса).
  */
-function extractAcquiringFeesFromComments(comments, dealAmount) {
-  const re = config.acquiringCommentRegex;
+function extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts = []) {
   const pct = Number(config.acquiringFeePercent) || 3;
-  if (!re || !isPlausibleMoney(dealAmount)) return [];
+  if (!isPlausibleMoney(dealAmount)) return [];
 
-  const hasComment = (comments || []).some((raw) => re.test(String(raw || '')));
-  if (!hasComment) return [];
+  const regexes = [
+    ...(config.acquiringCommentRegexes || []),
+    config.acquiringCommentRegex,
+  ].filter(Boolean);
 
-  const fee = Math.round(dealAmount * (pct / 100) * 100) / 100;
+  let matchedSnippet = '';
+  for (const raw of comments || []) {
+    const text = String(raw || '');
+    if (!text) continue;
+    if (regexes.some((re) => re.test(text))) {
+      matchedSnippet = text.slice(0, 160);
+      break;
+    }
+    // ещё мягче: «3%» + «эквайр» / «терминал» / «картой» в одном комментарии
+    const low = normalize(text);
+    if (
+      /3\s*%/.test(low) &&
+      (low.includes('эквайр') || low.includes('терминал') || low.includes('картой') || low.includes('безнал'))
+    ) {
+      matchedSnippet = text.slice(0, 160);
+      break;
+    }
+  }
+  if (!matchedSnippet) return [];
+
+  let fee = Math.round(dealAmount * (pct / 100) * 100) / 100;
+  // альтернативные округления, которые любит Битрикс
+  const variants = [
+    fee,
+    Math.round(dealAmount * (pct / 100)),
+    Math.floor(dealAmount * (pct / 100) * 100) / 100,
+    Math.ceil(dealAmount * (pct / 100) * 100) / 100,
+  ];
+
+  const tol = Math.max(Number(config.amountTolerance) || 0, 1);
+  const prefers = (preferAmounts || []).filter((n) => Number.isFinite(n));
+  let snapped = false;
+  if (prefers.length) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const v of variants) {
+      for (const p of prefers) {
+        const d = Math.abs(v - p);
+        if (d <= tol && d < bestDist) {
+          best = p;
+          bestDist = d;
+        }
+      }
+    }
+    if (best !== null) {
+      fee = best;
+      snapped = true;
+    }
+  }
+
   if (!isPlausibleMoney(fee)) return [];
 
   return [
     {
       amount: fee,
       base: dealAmount,
-      snippet: '3% за эквайринг от суммы сделки',
+      snapped,
+      snippet: matchedSnippet || '3% за эквайринг от суммы сделки',
     },
   ];
 }
@@ -687,6 +910,16 @@ function extractLabeledAmount(text, { strict = false } = {}) {
   return null;
 }
 
+async function waitTaskPanel(page) {
+  await settleAfterAction(
+    async () => {
+      const n = page.frames().filter((f) => /IFRAME=Y|SIDE_SLIDER|\/tasks\//i.test(f.url())).length;
+      return n > 0;
+    },
+    { minMs: config.uiSettleMs || 200, maxMs: config.uiSettleTimeoutMs || 3000 }
+  );
+}
+
 async function openTask(page, dealFrame, task) {
   try {
     const ctx = dealFrame || page;
@@ -694,7 +927,7 @@ async function openTask(page, dealFrame, task) {
       const link = ctx.locator(`a[href="${task.href}"]`).first();
       if (await link.isVisible({ timeout: 1000 }).catch(() => false)) {
         await link.click({ timeout: 3000 });
-        await page.waitForTimeout(600);
+        await waitTaskPanel(page);
         return true;
       }
       const partial = ctx
@@ -703,7 +936,7 @@ async function openTask(page, dealFrame, task) {
         .first();
       if (await partial.isVisible({ timeout: 500 }).catch(() => false)) {
         await partial.click({ timeout: 3000 });
-        await page.waitForTimeout(600);
+        await waitTaskPanel(page);
         return true;
       }
     }
@@ -712,7 +945,7 @@ async function openTask(page, dealFrame, task) {
       const byTitle = ctx.locator(`a:has-text("${task.title}")`).first();
       if (await byTitle.isVisible({ timeout: 600 }).catch(() => false)) {
         await byTitle.click({ timeout: 3000 });
-        await page.waitForTimeout(600);
+        await waitTaskPanel(page);
         return true;
       }
     }
@@ -720,7 +953,7 @@ async function openTask(page, dealFrame, task) {
     const openBtn = ctx.locator('text=Открыть').first();
     if (await openBtn.isVisible({ timeout: 500 }).catch(() => false)) {
       await openBtn.click({ timeout: 2000 });
-      await page.waitForTimeout(600);
+      await waitTaskPanel(page);
       return true;
     }
   } catch (err) {
@@ -738,11 +971,11 @@ async function closeSidePanel(page) {
       .first();
     if (await close.isVisible({ timeout: 500 }).catch(() => false)) {
       await close.click({ timeout: 1000 }).catch(() => {});
-      await page.waitForTimeout(400);
+      await settleAfterAction(null, { minMs: config.uiSettleMs || 200, maxMs: config.uiSettleMs || 200 });
       return;
     }
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(300);
+    await settleAfterAction(null, { minMs: Math.min(200, config.uiSettleMs || 200), maxMs: 200 });
   } catch {
     // ignore
   }

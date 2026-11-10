@@ -26,6 +26,18 @@ async function waitUntil(check, { timeoutMs = 15000, intervalMs = 150, label = '
   return false;
 }
 
+/**
+ * Короткая «усадка» UI после клика: сначала minMs, потом ждём условие или maxMs.
+ * На Windows длинные фиксированные sleep дают заметный лаг.
+ */
+async function settleAfterAction(check, { minMs = 200, maxMs = 3000, intervalMs = 100 } = {}) {
+  if (minMs > 0) await sleep(minMs);
+  if (typeof check !== 'function') return true;
+  const left = Math.max(0, maxMs - minMs);
+  if (left <= 0) return true;
+  return waitUntil(check, { timeoutMs: left, intervalMs });
+}
+
 function normalize(text) {
   return String(text || '')
     .replace(/\s+/g, ' ')
@@ -136,6 +148,7 @@ function formatMoney(n) {
 module.exports = {
   sleep,
   waitUntil,
+  settleAfterAction,
   normalize,
   parseMoney,
   isPlausibleMoney,

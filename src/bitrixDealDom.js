@@ -13,7 +13,8 @@
  *   .crm-entity-stream-section / .crm-timeline__card-wrapper
  */
 
-const { parseMoney, waitUntil } = require('./utils');
+const config = require('../config');
+const { parseMoney, waitUntil, settleAfterAction } = require('./utils');
 const { logStep, logOk, logWarn } = require('./log');
 
 function extractDealId(url) {
@@ -50,7 +51,7 @@ async function closeDealPanel(page, dealId) {
 
     const gone = await waitUntil(
       async () => dealSliderFrames(page, dealId).length === 0,
-      { timeoutMs: 2500, intervalMs: 100 }
+      { timeoutMs: process.platform === 'win32' ? 1800 : 2500, intervalMs: 80 }
     );
     if (gone) {
       logStep('iframe', `закрыт slider #${dealId}`);
@@ -74,12 +75,33 @@ async function closeDealPanel(page, dealId) {
   logWarn(`не удалось дождаться закрытия slider #${dealId}`);
 }
 
+/** Клик по ссылке сделки в отчёте — без полной перезагрузки страницы. */
+async function tryOpenDealByClick(page, dealId) {
+  if (!dealId || page.isClosed()) return false;
+  try {
+    const link = page.locator(`a[href*="/crm/deal/details/${dealId}"]`).first();
+    if (!(await link.isVisible({ timeout: 400 }).catch(() => false))) return false;
+    logStep('iframe', `клик по ссылке #${dealId} в отчёте`);
+    await link.click({ timeout: 3000 });
+    await settleAfterAction(
+      async () => dealSliderFrames(page, dealId).length > 0,
+      { minMs: config.uiSettleMs || 200, maxMs: config.uiSettleTimeoutMs || 3000 }
+    );
+    return true;
+  } catch (err) {
+    logWarn(`клик по сделке #${dealId}: ${err.message || err}`);
+    return false;
+  }
+}
+
 /**
  * Открыть карточку нужной сделки и вернуть её iframe.
  * previousDealId — закрыть прошлую ДО открытия новой.
+ * Сначала клик в отчёте (быстрее на Windows), иначе goto.
  */
-async function openDealCard(page, dealUrl, { previousDealId = '', timeoutMs = 20000 } = {}) {
+async function openDealCard(page, dealUrl, { previousDealId = '', timeoutMs } = {}) {
   const dealId = extractDealId(dealUrl);
+  const openTimeout = timeoutMs || config.dealOpenTimeoutMs || 20000;
   logStep('iframe', `открываю #${dealId || '?'}`);
 
   if (previousDealId) {
@@ -93,26 +115,33 @@ async function openDealCard(page, dealUrl, { previousDealId = '', timeoutMs = 20
     }
     await waitUntil(
       async () => !page.frames().some((f) => /IFRAME=Y|SIDE_SLIDER/i.test(f.url()) && f !== page.mainFrame()),
-      { timeoutMs: 1500, intervalMs: 100 }
+      { timeoutMs: 1200, intervalMs: 80 }
     );
   }
 
-  try {
-    await page.goto(dealUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-  } catch (err) {
-    logWarn(`goto: ${err.message || err}`);
+  let openedByClick = false;
+  if (config.openDealByClick !== false) {
+    openedByClick = await tryOpenDealByClick(page, dealId);
   }
 
-  const frame = await resolveDealFrame(page, dealUrl, timeoutMs);
+  if (!openedByClick) {
+    try {
+      await page.goto(dealUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch (err) {
+      logWarn(`goto: ${err.message || err}`);
+    }
+  }
+
+  const frame = await resolveDealFrame(page, dealUrl, openTimeout);
   if (!frame) {
-    // повторный goto, если slider не поднялся
+    // fallback: полный переход, если клик/первый goto не подняли slider
     logWarn('iframe не появился — повторный переход');
     try {
       await page.goto(dealUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
     } catch {
       // ignore
     }
-    const again = await resolveDealFrame(page, dealUrl, timeoutMs);
+    const again = await resolveDealFrame(page, dealUrl, openTimeout);
     if (again) return again;
     throw new Error(`Не открылся iframe сделки #${dealId}`);
   }
@@ -489,16 +518,19 @@ async function findClientInvoiceInFrame(frame, dealName) {
   }, dealName);
 }
 
-async function findPaymentTasksInFrame(frame, hints, dealName) {
+async function findPaymentTasksInFrame(frame, hints, dealName, options = {}) {
+  const requireDealName = options.requireDealName !== false;
   return frame.evaluate(
-    ({ hints, dealName }) => {
+    ({ hints, dealName, requireDealName }) => {
       const norm = (s) =>
         String(s || '')
           .replace(/\s+/g, ' ')
           .trim()
           .toLowerCase()
           .replace(/ё/g, 'е');
-      const hs = hints.map(norm);
+      const hs = hints.map(norm).filter(Boolean);
+      // более длинные хинты важнее («списание со склада» раньше «списание»)
+      hs.sort((a, b) => b.length - a.length);
       const name = norm(dealName);
       const tasks = [];
 
@@ -509,17 +541,22 @@ async function findPaymentTasksInFrame(frame, hints, dealName) {
       for (const section of sections) {
         const text = (section.innerText || '').replace(/\s+/g, ' ').trim();
         const low = norm(text);
-        if (!low.includes('задача')) continue;
+        if (!low.includes('задача') && !hs.some((h) => h.includes('списание') && low.includes(h))) {
+          continue;
+        }
         const matched = hs.find((h) => low.includes(h));
         if (!matched) continue;
         // пропускаем «Создана задача …» без карточки
         if (/^создана задача/i.test(text) && !/крайний срок|исполнитель|открыть/i.test(text)) continue;
-        if (name && !low.includes(name)) continue;
+        // для списания название сделки в карточке часто отсутствует
+        if (requireDealName && name && !low.includes(name)) continue;
 
         const titleLink = Array.from(section.querySelectorAll('a')).find((a) => {
           const t = norm(a.textContent || '');
           return hs.some((h) => t.includes(h)) && (a.href || '').includes('/tasks/task/view/');
-        });
+        }) || Array.from(section.querySelectorAll('a')).find((a) =>
+          (a.href || '').includes('/tasks/task/view/')
+        );
 
         const title =
           (titleLink?.textContent || '').replace(/\s+/g, ' ').trim() ||
@@ -587,7 +624,7 @@ async function findPaymentTasksInFrame(frame, hints, dealName) {
       }
       return Array.from(map.values());
     },
-    { hints, dealName }
+    { hints, dealName, requireDealName }
   );
 }
 
@@ -619,7 +656,7 @@ async function readTimelineComments(frame) {
         low.includes('задача') &&
         (low.includes('предоплата') ||
           low.includes('постоплата') ||
-          low.includes('списание со склада') ||
+          low.includes('списание') ||
           /крайний срок|исполнитель/i.test(text));
       if (isTaskCard) continue;
 
@@ -635,6 +672,8 @@ async function readTimelineComments(frame) {
           low.includes('cdek') ||
           low.includes('сдек') ||
           low.includes('эквайринг') ||
+          low.includes('эквайр') ||
+          /3\s*%/.test(low) ||
           low.includes('транспорт')) &&
         !out.some((t) => norm(t).includes(low) || low.includes(norm(t).slice(0, 40)))
       ) {
@@ -662,7 +701,7 @@ async function scrollTimelineInFrame(frame, steps = 4) {
           t.includes('счёт заказчику') ||
           t.includes('предоплата') ||
           t.includes('постоплата') ||
-          t.includes('списание со склада')
+          t.includes('списание')
         );
       };
 

@@ -1,4 +1,33 @@
+const config = require('../config');
+const { settleAfterAction } = require('./utils');
 const { log, logStep, logOk, logWarn } = require('./log');
+
+async function settleReport(page, beforeSignature) {
+  const minMs = config.uiSettleMs || 250;
+  const maxMs = config.uiSettleTimeoutMs || 3000;
+  await settleAfterAction(
+    async () => {
+      if (!beforeSignature) return true;
+      const after = await page.evaluate(() => {
+        const ids = Array.from(document.querySelectorAll('a[href*="/crm/deal/details/"]'))
+          .map((a) => (a.href.match(/\/crm\/deal\/details\/(\d+)/) || [])[1])
+          .filter(Boolean);
+        return ids.slice(0, 5).join(',');
+      });
+      return after && after !== beforeSignature;
+    },
+    { minMs, maxMs }
+  );
+}
+
+async function reportSignature(page) {
+  return page.evaluate(() => {
+    const ids = Array.from(document.querySelectorAll('a[href*="/crm/deal/details/"]'))
+      .map((a) => (a.href.match(/\/crm\/deal\/details\/(\d+)/) || [])[1])
+      .filter(Boolean);
+    return ids.slice(0, 5).join(',');
+  });
+}
 
 /**
  * Собирает ссылки на сделки из страницы отчёта Битрикс24.
@@ -50,7 +79,7 @@ async function collectDealLinks(page) {
       break;
     }
     pageNo++;
-    await page.waitForTimeout(600);
+    await settleReport(page);
   }
 
   if (pageNo > maxPages) {
@@ -113,8 +142,9 @@ async function forceShowAllInUrl(page) {
     }
     if (changed) {
       log(`  обновляю URL отчёта: SHOWALL / page size → ${url.toString().slice(0, 120)}...`);
+      const before = await reportSignature(page).catch(() => '');
       await page.goto(url.toString(), { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await page.waitForTimeout(700);
+      await settleReport(page, before);
     }
   } catch (err) {
     logWarn(`  forceShowAllInUrl: ${err.message || err}`);
@@ -135,8 +165,9 @@ async function tryShowAll(page) {
       const el = page.locator(sel).first();
       if (await el.isVisible({ timeout: 800 })) {
         log(`  клик по «${sel}»`);
+        const before = await reportSignature(page).catch(() => '');
         await el.click({ timeout: 2000 });
-        await page.waitForTimeout(800);
+        await settleReport(page, before);
         logOk('пагинация: «показать все»');
         return;
       }
@@ -173,8 +204,9 @@ async function trySetPageSize(page) {
         if (!best || n > best.n) best = { ...o, n };
       }
       if (best) {
+        const before = await reportSignature(page).catch(() => '');
         await select.selectOption(best.value || String(best.n));
-        await page.waitForTimeout(800);
+        await settleReport(page, before);
         logOk(`  выбрано строк на странице: ${best.n}`);
         return;
       }
@@ -192,8 +224,9 @@ async function trySetPageSize(page) {
         // грубый фильтр: пагинация обычно внизу
         if (box && box.y > 200) {
           log(`  клик по размеру страницы «${n}»`);
+          const before = await reportSignature(page).catch(() => '');
           await link.click({ timeout: 1500 });
-          await page.waitForTimeout(800);
+          await settleReport(page, before);
           return;
         }
       }
@@ -233,14 +266,9 @@ async function goToNextReportPage(page) {
 
       log(`  клик «следующая страница» (${sel})`);
       await el.click({ timeout: 2000 });
-      await page.waitForTimeout(700);
+      await settleReport(page, before);
 
-      const after = await page.evaluate(() => {
-        const ids = Array.from(document.querySelectorAll('a[href*="/crm/deal/details/"]'))
-          .map((a) => (a.href.match(/\/crm\/deal\/details\/(\d+)/) || [])[1])
-          .filter(Boolean);
-        return ids.slice(0, 5).join(',');
-      });
+      const after = await reportSignature(page);
       if (after && after !== before) {
         logOk('страница списка сменилась');
         return true;
@@ -275,8 +303,9 @@ async function goToNextReportPage(page) {
       if (!isCurrentSibling) continue;
 
       log(`  клик по номеру страницы «${text}»`);
+      const beforeNum = await reportSignature(page).catch(() => '');
       await a.click({ timeout: 2000 });
-      await page.waitForTimeout(700);
+      await settleReport(page, beforeNum);
       return true;
     }
   } catch {

@@ -5,7 +5,13 @@
   "main": "start.js",
   "scripts": {
     "start": "node start.js",
-    "check": "node start.js"
+    "check": "node start.js",
+    "update:check": "node scripts/update-cli.js check",
+    "update:apply": "node scripts/update-cli.js apply",
+    "build:gui": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-gui.ps1",
+    "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
+    "build:exe": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-all.ps1",
+    "build:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-launcher.ps1"
   },
   "engines": {
     "node": ">=18"

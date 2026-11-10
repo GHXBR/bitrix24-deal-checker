@@ -1,6 +1,10 @@
 node_modules/
 results/
 .auth/
+.browser-profile/
+runtime/
+.update-tmp/
+.app-version.json
 *.log
 .DS_Store
 Thumbs.db
