@@ -482,27 +482,46 @@ async function findClientInvoiceInFrame(frame, dealName) {
         .replace(/ё/g, 'е');
     const wantedName = norm(name);
 
+    const isFileLink = (a) => {
+      const t = (a.textContent || '').trim();
+      const href = a.href || '';
+      const title = a.getAttribute('title') || '';
+      const download = a.getAttribute('download') || '';
+      const blob = `${t} ${title} ${download} ${href}`;
+      return (
+        /\.(pdf|docx?|xlsx?|xls|rtf)$/i.test(blob) ||
+        /исходящ/i.test(blob) ||
+        href.includes('disk/uf.php') ||
+        href.includes('crm_show_file.php') ||
+        href.includes('/disk/') ||
+        href.includes('download') ||
+        a.className?.toString?.().includes('disk') ||
+        a.hasAttribute('data-object-id')
+      );
+    };
+
     const sections = Array.from(
       document.querySelectorAll('.crm-entity-stream-section, .crm-timeline__card-wrapper')
     );
 
     for (const section of sections) {
       const text = norm(section.innerText || '');
-      if (!text.includes('счет заказчику')) continue;
+      if (!text.includes('счет заказчику') && !text.includes('счёт заказчику')) continue;
 
       const links = Array.from(section.querySelectorAll('a'));
-      const fileLink = links.find((a) => {
-        const t = (a.textContent || '').trim();
-        const href = a.href || '';
-        return (
-          /\.(pdf|docx?|xlsx?|xls)$/i.test(t) ||
-          /исходящ/i.test(t) ||
-          href.includes('disk/uf.php') ||
-          href.includes('crm_show_file.php')
-        );
-      });
+      let fileLink =
+        links.find((a) => isFileLink(a) && wantedName && norm(a.textContent || '').includes(wantedName)) ||
+        links.find((a) => isFileLink(a) && /исходящ/i.test(a.textContent || a.getAttribute('title') || '')) ||
+        links.find((a) => isFileLink(a));
 
-      const fileName = (fileLink?.textContent || '').replace(/\s+/g, ' ').trim();
+      const fileName = (
+        fileLink?.getAttribute('title') ||
+        fileLink?.getAttribute('download') ||
+        fileLink?.textContent ||
+        ''
+      )
+        .replace(/\s+/g, ' ')
+        .trim();
       const okName = !wantedName || !fileName || norm(fileName).includes(wantedName);
 
       return {

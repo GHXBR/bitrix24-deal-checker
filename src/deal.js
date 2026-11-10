@@ -264,15 +264,9 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
       addIssue(
         result,
         'нет счёта заказчику',
-        `В ленте нет комментария «счёт заказчику» с вложенным файлом исходящего счёта${
-          dealName ? ` (в имени файла должен быть номер сделки «${dealName}»)` : ''
+        `В ленте нет комментария «счёт заказчику»${
+          dealName ? ` (ожидается исходящий счёт по сделке «${dealName}»)` : ''
         }`
-      );
-    } else if (!clientInvoice.fileName && !clientInvoice.fileHref) {
-      addIssue(
-        result,
-        'нет файла счёта заказчику',
-        'Комментарий «счёт заказчику» есть, но вложение исходящего счёта не найдено'
       );
     } else if (
       clientInvoice.fileName &&
@@ -286,43 +280,50 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
       );
     } else {
       logOk('проверка: счёт заказчику найден');
+      if (!clientInvoice.fileHref) {
+        logWarn('  ссылка на файл в ленте не видна — сумму из счёта заказчику не читаю');
+      }
     }
 
+    // Сумма исходящего счёта сверяется с графами затрат (Поставщик и др.), НЕ с суммой сделки
     if (
       config.checkClientInvoiceAmount !== false &&
       clientInvoice.found &&
-      (clientInvoice.fileHref || clientInvoice.fileName) &&
+      clientInvoice.fileHref &&
       config.downloadSupplierInvoices
     ) {
       logStep('счёт заказчику', 'читаю сумму из исходящего файла...');
-      let invoiceAmount = null;
-      if (clientInvoice.fileHref) {
-        invoiceAmount = await downloadByHref(
-          page,
-          dealFrame,
-          clientInvoice.fileHref,
-          clientInvoice.fileName,
-          { preferAmounts: [dealAmount, ...preferAmounts].filter((n) => n != null) }
-        );
-      }
+      const invoiceAmount = await downloadByHref(
+        page,
+        dealFrame,
+        clientInvoice.fileHref,
+        clientInvoice.fileName,
+        { preferAmounts }
+      );
       result.details.clientInvoice.amount = invoiceAmount;
       if (invoiceAmount === null) {
-        addIssue(
-          result,
-          'не прочитан счёт заказчику',
-          `Не удалось прочитать сумму из файла исходящего счёта «${clientInvoice.fileName || '—'}»`
+        logWarn(
+          `  не удалось прочитать сумму из «${clientInvoice.fileName || 'файла'}» — пропускаю сверку суммы`
         );
       } else {
         log(`  сумма в счёте заказчику = ${invoiceAmount}`);
-        const expected = isPlausibleMoney(dealAmount) ? dealAmount : null;
-        if (expected !== null && !amountsEqual(invoiceAmount, expected, config.amountTolerance)) {
+        const tol = config.amountTolerance;
+        const matchField = preferAmounts.find((a) => amountsEqual(invoiceAmount, a, tol));
+        const fieldsSum = preferAmounts.reduce((s, n) => s + n, 0);
+        const matchSum =
+          preferAmounts.length > 1 && amountsEqual(invoiceAmount, fieldsSum, Math.max(tol, 1));
+        if (preferAmounts.length && !matchField && !matchSum) {
           addIssue(
             result,
             'не сходится счёт заказчику',
-            `Сумма в исходящем счёте заказчику (${invoiceAmount}) не совпадает с суммой сделки (${expected})`
+            `Сумма в исходящем счёте заказчику (${invoiceAmount}) не совпадает с графами затрат [${preferAmounts.join(', ')}]`
           );
-        } else if (expected !== null) {
-          logOk('проверка: сумма счёта заказчику = сумма сделки');
+        } else if (matchField || matchSum) {
+          logOk(
+            matchField
+              ? `проверка: сумма счёта заказчику = графа (${matchField})`
+              : `проверка: сумма счёта заказчику = сумма граф (${fieldsSum})`
+          );
         }
       }
     }
