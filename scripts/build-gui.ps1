@@ -105,6 +105,9 @@ public class UiButton : Button {
   protected override void OnMouseDown(MouseEventArgs e) { if (e.Button == MouseButtons.Left) { _down = true; Invalidate(); } base.OnMouseDown(e); }
   protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
 
+  protected override void OnPaintBackground(PaintEventArgs e) {
+    Draw.FillBack(e.Graphics, this);
+  }
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
     e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
@@ -128,12 +131,16 @@ public class UiButton : Button {
 public class SoftCard : Panel {
   public SoftCard() {
     DoubleBuffered = true;
+    // Белый для детей; уголки карточки заливаем цветом окна в OnPaintBackground.
     BackColor = Theme.Surface;
   }
   protected override void OnPaintBackground(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-    Draw.FillBack(e.Graphics, this);
-    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), 18))
+    e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+    using (var outside = new SolidBrush(Theme.Canvas)) {
+      e.Graphics.FillRectangle(outside, ClientRectangle);
+    }
+    using (var path = Draw.Round(new Rectangle(0, 0, Math.Max(1, Width - 1), Math.Max(1, Height - 1)), 18))
     using (var br = new SolidBrush(Theme.Surface))
     using (var pen = new Pen(Theme.Line)) {
       e.Graphics.FillPath(br, path);
@@ -159,10 +166,12 @@ public class StatusPill : Control {
     Width = Math.Max(140, TextRenderer.MeasureText(Text, Font).Width + 32);
     Invalidate();
   }
+  protected override void OnPaintBackground(PaintEventArgs e) {
+    Draw.FillBack(e.Graphics, this);
+  }
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
     e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-    // Важно: не Clear(Transparent) — из этого получаются чёрные углы.
     Draw.FillBack(e.Graphics, this);
     using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), Height / 2))
     using (var br = new SolidBrush(_bg))
@@ -233,6 +242,14 @@ public class DealCheckerForm : Form {
     RegexOptions.Compiled | RegexOptions.IgnoreCase
   );
 
+  protected override CreateParams CreateParams {
+    get {
+      CreateParams cp = base.CreateParams;
+      cp.ExStyle |= 0x02000000; // WS_EX_COMPOSITED — без шлейфов при ресайзе
+      return cp;
+    }
+  }
+
   public DealCheckerForm(string root, string node) {
     appRoot = root;
     nodePath = node;
@@ -243,6 +260,8 @@ public class DealCheckerForm : Form {
     StartPosition = FormStartPosition.CenterScreen;
     Font = new Font("Segoe UI", 10f);
     BackColor = Theme.Canvas;
+    SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw, true);
+    UpdateStyles();
     DoubleBuffered = true;
 
     Paint += (s, e) => {
