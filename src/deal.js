@@ -74,14 +74,33 @@ function parseDealAmountFromTitle(dealName) {
   return null;
 }
 
-function resolveCashDealAmount(dealAmount, dealName, title) {
-  if (isPlausibleMoney(dealAmount) && dealAmount >= 100) return dealAmount;
-  if (config.parseDealAmountFromTitle === false) return dealAmount;
-  return (
-    parseDealAmountFromTitle(dealName) ||
-    parseDealAmountFromTitle(title) ||
-    dealAmount
-  );
+/**
+ * База для 3% у Нал/QR: поле суммы, иначе число из названия.
+ * Если несколько кандидатов — берём тот, от которого 3% уже лежит в графах.
+ */
+function resolveCashDealAmount(dealAmount, dealName, title, preferAmounts = []) {
+  const candidates = [];
+  if (isPlausibleMoney(dealAmount) && dealAmount >= 100) candidates.push(dealAmount);
+  if (config.parseDealAmountFromTitle !== false) {
+    for (const n of [dealName, title]) {
+      const fromTitle = parseDealAmountFromTitle(n);
+      if (fromTitle && !candidates.some((c) => Math.abs(c - fromTitle) < 0.001)) {
+        candidates.push(fromTitle);
+      }
+    }
+  }
+  if (!candidates.length) return dealAmount;
+
+  const pct = Number(config.acquiringFeePercent) || 3;
+  const tol = Math.max(Number(config.amountTolerance) || 0, 1);
+  const prefers = (preferAmounts || []).filter((n) => Number.isFinite(n));
+  for (const base of candidates) {
+    for (const v of acquiringFeeVariants(base, pct)) {
+      if (prefers.some((p) => Math.abs(p - v) <= tol)) return base;
+    }
+  }
+  // для Нал/QR цифрa в названии обычно и есть сумма сделки
+  return parseDealAmountFromTitle(dealName) || parseDealAmountFromTitle(title) || candidates[0];
 }
 
 async function readDealCardData(dealFrame, deal) {
@@ -242,10 +261,10 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   const skipClientInvoice = shouldSkipClientInvoice(dealName || deal.title || '');
   const preferAmounts = costFields.map((f) => f.amount).filter((n) => n !== null);
   const cashDealAmount = skipClientInvoice
-    ? resolveCashDealAmount(dealAmount, dealName || deal.title, deal.title)
+    ? resolveCashDealAmount(dealAmount, dealName || deal.title, deal.title, preferAmounts)
     : dealAmount;
-  if (skipClientInvoice && cashDealAmount !== dealAmount) {
-    log(`  сумма сделки для Нал/QR из названия: ${cashDealAmount}`);
+  if (skipClientInvoice) {
+    log(`  база Нал/QR для эквайринга 3%: ${cashDealAmount ?? '—'} (поле суммы: ${dealAmount ?? '—'})`);
     result.details.dealAmountFromTitle = cashDealAmount;
   }
 
@@ -260,6 +279,7 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
       `  found=${clientInvoice.found}, file=«${clientInvoice.fileName || ''}», snippet=«${(clientInvoice.snippet || '').slice(0, 80)}»`
     );
 
+    // Счёт заказчику: только наличие в ленте. Сумму НЕ сверяем ни с чем.
     if (!clientInvoice.found) {
       addIssue(
         result,
@@ -279,53 +299,7 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
         `Номер в файле счёта заказчику не совпадает со сделкой: сделка «${dealName}», файл «${clientInvoice.fileName}»`
       );
     } else {
-      logOk('проверка: счёт заказчику найден');
-      if (!clientInvoice.fileHref) {
-        logWarn('  ссылка на файл в ленте не видна — сумму из счёта заказчику не читаю');
-      }
-    }
-
-    // Сумма исходящего счёта сверяется с графами затрат (Поставщик и др.), НЕ с суммой сделки
-    if (
-      config.checkClientInvoiceAmount !== false &&
-      clientInvoice.found &&
-      clientInvoice.fileHref &&
-      config.downloadSupplierInvoices
-    ) {
-      logStep('счёт заказчику', 'читаю сумму из исходящего файла...');
-      const invoiceAmount = await downloadByHref(
-        page,
-        dealFrame,
-        clientInvoice.fileHref,
-        clientInvoice.fileName,
-        { preferAmounts }
-      );
-      result.details.clientInvoice.amount = invoiceAmount;
-      if (invoiceAmount === null) {
-        logWarn(
-          `  не удалось прочитать сумму из «${clientInvoice.fileName || 'файла'}» — пропускаю сверку суммы`
-        );
-      } else {
-        log(`  сумма в счёте заказчику = ${invoiceAmount}`);
-        const tol = config.amountTolerance;
-        const matchField = preferAmounts.find((a) => amountsEqual(invoiceAmount, a, tol));
-        const fieldsSum = preferAmounts.reduce((s, n) => s + n, 0);
-        const matchSum =
-          preferAmounts.length > 1 && amountsEqual(invoiceAmount, fieldsSum, Math.max(tol, 1));
-        if (preferAmounts.length && !matchField && !matchSum) {
-          addIssue(
-            result,
-            'не сходится счёт заказчику',
-            `Сумма в исходящем счёте заказчику (${invoiceAmount}) не совпадает с графами затрат [${preferAmounts.join(', ')}]`
-          );
-        } else if (matchField || matchSum) {
-          logOk(
-            matchField
-              ? `проверка: сумма счёта заказчику = графа (${matchField})`
-              : `проверка: сумма счёта заказчику = сумма граф (${fieldsSum})`
-          );
-        }
-      }
+      logOk('проверка: счёт заказчику найден (сумму не сверяем)');
     }
   }
 
@@ -412,7 +386,10 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
   }
 
   const acquiringAmounts = skipClientInvoice
-    ? extractAcquiringFeesFromComments(comments, cashDealAmount, preferAmounts)
+    ? extractAcquiringFeesFromComments(comments, cashDealAmount, preferAmounts, {
+        dealName: dealName || deal.title,
+        title: deal.title,
+      })
     : [];
   for (const x of acquiringAmounts) {
     sourceEntries.push({
@@ -978,59 +955,62 @@ function acquiringFeeVariants(dealAmount, pct) {
 
 /**
  * НАЛ/QR: 3% от суммы сделки.
- * 1) если в графе уже лежит ≈3% — берём её (даже без комментария);
+ * 1) если в графе уже лежит ≈3% от базы (поле / название) — берём её;
  * 2) иначе, если есть комментарий про эквайринг — считаем 3%.
  */
-function extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts = []) {
+function extractAcquiringFeesFromComments(comments, dealAmount, preferAmounts = [], opts = {}) {
   const pct = Number(config.acquiringFeePercent) || 3;
-  if (!isPlausibleMoney(dealAmount) || dealAmount < 100) return [];
-
   const tol = Math.max(Number(config.amountTolerance) || 0, 1);
   const prefers = (preferAmounts || []).filter((n) => Number.isFinite(n));
-  const variants = acquiringFeeVariants(dealAmount, pct);
   const matchedSnippet = acquiringCommentHit(comments);
 
-  let fieldHit = null;
-  let bestDist = Infinity;
-  for (const v of variants) {
-    for (const p of prefers) {
-      const d = Math.abs(v - p);
-      if (d <= tol && d < bestDist) {
-        fieldHit = p;
-        bestDist = d;
+  const bases = [];
+  const pushBase = (b) => {
+    if (!isPlausibleMoney(b) || b < 100) return;
+    if (!bases.some((x) => Math.abs(x - b) < 0.001)) bases.push(b);
+  };
+  pushBase(dealAmount);
+  if (config.parseDealAmountFromTitle !== false) {
+    pushBase(parseDealAmountFromTitle(opts.dealName));
+    pushBase(parseDealAmountFromTitle(opts.title));
+  }
+  if (!bases.length) return [];
+
+  let best = null; // { fieldHit, base, dist }
+  for (const base of bases) {
+    for (const v of acquiringFeeVariants(base, pct)) {
+      for (const p of prefers) {
+        const d = Math.abs(v - p);
+        if (d <= tol && (!best || d < best.dist)) {
+          best = { fieldHit: p, base, dist: d };
+        }
       }
     }
   }
 
-  // Главный путь для Нал/QR: графа уже содержит 3%
-  if (fieldHit !== null && config.acquiringMatchFromCostFields !== false) {
+  if (best && config.acquiringMatchFromCostFields !== false) {
     return [
       {
-        amount: fieldHit,
-        base: dealAmount,
+        amount: best.fieldHit,
+        base: best.base,
         snapped: true,
         fromField: true,
-        snippet: matchedSnippet || `3% от ${dealAmount} = ${fieldHit} (из графы)`,
+        snippet: matchedSnippet || `3% от ${best.base} = ${best.fieldHit} (из графы)`,
       },
     ];
   }
 
   if (!matchedSnippet) return [];
 
-  let fee = variants[0];
-  let snapped = false;
-  if (fieldHit !== null) {
-    fee = fieldHit;
-    snapped = true;
-  }
-
+  const base = bases[0];
+  const fee = acquiringFeeVariants(base, pct)[0];
   if (!isPlausibleMoney(fee)) return [];
 
   return [
     {
       amount: fee,
-      base: dealAmount,
-      snapped,
+      base,
+      snapped: false,
       fromField: false,
       snippet: matchedSnippet,
     },
