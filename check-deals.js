@@ -36,7 +36,7 @@ function isGuiMode() {
 async function main() {
   const guiMode = isGuiMode();
   info('Проверка сделок Битрикс24 (только чтение, ничего не меняет)');
-  info('Сборка: 2026-11-10g (счёт заказчику без сверки сумм; эквайринг Нал/QR)');
+  info('Сборка: 2026-11-11q (списание: новый UI описания; цена=сумма при 1 шт; суммы 3 000)');
   if (config.verbose) info('Подробные логи включены (config.verbose / VERBOSE=1)');
 
   let reportUrl = readReportUrlFromArgs();
@@ -154,13 +154,16 @@ async function main() {
   try {
     reportFile = writeReport(results, { final: true });
     info(`Excel-отчёт: ${reportFile}`);
-    info('Лист «Нужно исправить» — что поправить в сделках.\n');
+    info('Excel: лист «Нужно исправить» — по одной строке на замечание.\n');
     openReport(reportFile);
   } catch (err) {
     logWarn(`Не удалось сохранить Excel: ${err.message || err}`);
   }
 
-  if (guiMode) {
+  if (process.env.SKIP_PAUSE === '1' || process.env.AUTO_CLOSE === '1') {
+    info('Готово (AUTO_CLOSE).');
+    await sleep(800);
+  } else if (guiMode) {
     info('Готово. Браузер можно закрыть.');
     await sleep(1500);
   } else {

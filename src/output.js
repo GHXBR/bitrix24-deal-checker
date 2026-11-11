@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { formatMoney } = require('./utils');
+const fmt = (n) => (n == null || !Number.isFinite(n) ? '' : String(n));
 
 function ensureResultsDir() {
   const dir = path.join(process.cwd(), 'results');
@@ -54,7 +54,7 @@ function clientInvoiceText(r) {
   if (r.details?.clientInvoice?.skipped) return 'не требуется';
   if (r.details?.clientInvoice?.found) {
     const amount = r.details.clientInvoice.amount;
-    return amount != null ? `да (${formatMoney(amount)})` : 'да';
+    return amount != null ? `да (${fmt(amount)})` : 'да';
   }
   return 'нет';
 }
@@ -67,7 +67,7 @@ function statusText(r) {
 
 function sourceText(r) {
   if (r.details?.sourceOrigins) return r.details.sourceOrigins;
-  return (r.details?.sourceAmounts || []).map(formatMoney).join(', ');
+  return (r.details?.sourceAmounts || []).map(fmt).join(', ');
 }
 
 function buildCsvContent(results) {
@@ -98,7 +98,7 @@ function buildCsvContent(results) {
         clientInvoiceText(r),
         r.details?.clientInvoice?.fileName || '',
         sourceText(r),
-        (r.details?.fieldAmounts || []).map(formatMoney).join(', '),
+        (r.details?.fieldAmounts || []).map(fmt).join(', '),
         r.ok ? '' : formatDetails(r),
       ]
         .map(escapeCsv)
@@ -108,23 +108,35 @@ function buildCsvContent(results) {
   return `\uFEFF${lines.join('\n')}`;
 }
 
-/** Строки для листа «Нужно исправить»: одна строка = одна сделка. */
+/**
+ * Лист «Нужно исправить»: одна строка = одно замечание.
+ * Так удобнее править в Битриксе по списку.
+ */
 function buildFixRows(results) {
   const rows = [];
   for (const r of results) {
     if (r.ok) continue;
-    rows.push({
-      id: r.id,
-      name: r.details?.dealName || r.title || '',
-      url: r.url || '',
-      status: statusText(r),
-      comment: formatComment(r) || 'нужно исправить',
-      detail: formatDetails(r) || 'Детали замечания не разобраны',
-      closeMonth: r.details?.closeMonth || '',
-      clientInvoice: clientInvoiceText(r),
-      sourceAmounts: sourceText(r),
-      fieldAmounts: (r.details?.fieldAmounts || []).map(formatMoney).join(', '),
-    });
+    const name = r.details?.dealName || r.title || '';
+    const issues = getIssues(r);
+    if (!issues.length) {
+      rows.push({
+        id: r.id,
+        name,
+        url: r.url || '',
+        comment: formatComment(r) || 'нужно исправить',
+        detail: 'Детали замечания не разобраны',
+      });
+      continue;
+    }
+    for (const issue of issues) {
+      rows.push({
+        id: r.id,
+        name,
+        url: r.url || '',
+        comment: String(issue.comment || '').trim() || 'нужно исправить',
+        detail: String(issue.detail || '').trim() || String(issue.comment || '').trim(),
+      });
+    }
   }
   return rows;
 }
@@ -136,13 +148,13 @@ function buildAllRows(results) {
     url: r.url || '',
     status: statusText(r),
     comment: r.ok ? '' : formatComment(r),
-    detail: r.ok ? '' : formatDetails(r),
     closeMonth: r.details?.closeMonth || '',
     clientInvoice: clientInvoiceText(r),
-    invoiceFile: r.details?.clientInvoice?.fileName || '',
-    sourceAmounts: sourceText(r),
-    fieldAmounts: (r.details?.fieldAmounts || []).map(formatMoney).join(', '),
   }));
+}
+
+function setColWidths(sheet, widths) {
+  sheet['!cols'] = widths.map((wch) => ({ wch }));
 }
 
 function writeExcel(results, { final = false } = {}) {
@@ -153,103 +165,62 @@ function writeExcel(results, { final = false } = {}) {
 
   const fixSheet = XLSX.utils.json_to_sheet(
     fixRows.length
-      ? fixRows.map((r) => ({
+      ? fixRows.map((r, idx) => ({
+          '№': idx + 1,
           ID: r.id,
-          Название: r.name,
-          Ссылка: r.url,
-          Статус: r.status,
-          Комментарий: r.comment,
-          'Месяц завершения': r.closeMonth,
-          'Счёт заказчику': r.clientInvoice,
-          'Откуда суммы': r.sourceAmounts,
-          'Суммы в графах': r.fieldAmounts,
+          Сделка: r.name,
+          'Что не так': r.comment,
           Подробно: r.detail,
+          Ссылка: r.url,
         }))
       : [
           {
+            '№': '',
             ID: '',
-            Название: 'Проблемных сделок нет',
-            Ссылка: '',
-            Статус: '',
-            Комментарий: '',
-            'Месяц завершения': '',
-            'Счёт заказчику': '',
-            'Откуда суммы': '',
-            'Суммы в графах': '',
+            Сделка: 'Проблемных сделок нет',
+            'Что не так': '',
             Подробно: '',
+            Ссылка: '',
           },
         ]
   );
 
   const allSheet = XLSX.utils.json_to_sheet(
-    allRows.map((r) => ({
+    allRows.map((r, idx) => ({
+      '№': idx + 1,
       ID: r.id,
-      Название: r.name,
-      Ссылка: r.url,
+      Сделка: r.name,
       Статус: r.status,
       Комментарий: r.comment,
       'Месяц завершения': r.closeMonth,
       'Счёт заказчику': r.clientInvoice,
-      'Файл счёта': r.invoiceFile,
-      'Откуда суммы': r.sourceAmounts,
-      'Суммы в графах': r.fieldAmounts,
-      Подробно: r.detail,
+      Ссылка: r.url,
     }))
   );
 
-  const failed = results.filter((r) => r.checkFailed).length;
-  const summarySheet = XLSX.utils.aoa_to_sheet([
-    ['Проверка сделок Битрикс24'],
-    ['Дата', new Date().toLocaleString('ru-RU')],
-    ['Всего сделок', results.length],
-    ['OK', results.filter((r) => r.ok).length],
-    ['Нужно исправить', results.filter((r) => !r.ok && !r.checkFailed).length],
-    ['Не удалось проверить', failed],
-    ['Сделок с замечаниями', fixRows.length],
-    [],
-    ['Колонка «Откуда суммы» — происхождение каждой суммы (счёт / списание / эквайринг).'],
-    ['Колонка «Комментарий» — коротко, что не так.'],
-    ['Последняя колонка «Подробно» — какие суммы и поля не сошлись.'],
-  ]);
+  setColWidths(fixSheet, [6, 10, 36, 36, 70, 46]);
+  setColWidths(allSheet, [6, 10, 36, 20, 40, 16, 16, 46]);
 
-  // ширины колонок для удобного чтения в Excel
-  fixSheet['!cols'] = [
-    { wch: 10 },
-    { wch: 28 },
-    { wch: 42 },
-    { wch: 20 },
-    { wch: 40 },
-    { wch: 18 },
-    { wch: 18 },
-    { wch: 48 },
-    { wch: 24 },
-    { wch: 72 },
-  ];
-  allSheet['!cols'] = [
-    { wch: 10 },
-    { wch: 28 },
-    { wch: 42 },
-    { wch: 20 },
-    { wch: 40 },
-    { wch: 18 },
-    { wch: 18 },
-    { wch: 36 },
-    { wch: 48 },
-    { wch: 24 },
-    { wch: 72 },
-  ];
-
+  // Без листа «Итог»: сразу рабочая таблица замечаний.
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, summarySheet, 'Итог');
   XLSX.utils.book_append_sheet(wb, fixSheet, 'Нужно исправить');
   XLSX.utils.book_append_sheet(wb, allSheet, 'Все сделки');
 
   const latest = path.join(dir, 'check_latest.xlsx');
-  XLSX.writeFile(wb, latest);
-  if (final) {
-    XLSX.writeFile(wb, path.join(dir, `check_${stamp()}.xlsx`));
-  }
-  return latest;
+  const writeSafe = (file) => {
+    try {
+      XLSX.writeFile(wb, file);
+      return file;
+    } catch (err) {
+      if (!/EBUSY|EPERM|locked/i.test(String(err && err.message))) throw err;
+      const alt = file.replace(/\.xlsx$/i, `_${Date.now()}.xlsx`);
+      XLSX.writeFile(wb, alt);
+      return alt;
+    }
+  };
+  const written = writeSafe(latest);
+  if (final) writeSafe(path.join(dir, `check_${stamp()}.xlsx`));
+  return written;
 }
 
 function writeCsv(results, { final = false } = {}) {
@@ -332,8 +303,6 @@ function printSummary(results) {
 }
 
 module.exports = {
-  writeCsv,
-  writeExcel,
   writeReport,
   openReport,
   printSummary,

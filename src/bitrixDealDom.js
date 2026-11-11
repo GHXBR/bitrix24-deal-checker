@@ -17,6 +17,9 @@ const config = require('../config');
 const { parseMoney, waitUntil, settleAfterAction } = require('./utils');
 const { logStep, logOk, logWarn } = require('./log');
 
+const CLOSE_SEL =
+  '.side-panel-label-icon-close, .side-panel-close, [class*="side-panel"] .ui-icon-btn-close, button[title="Закрыть"]';
+
 function extractDealId(url) {
   const m = String(url || '').match(/\/crm\/deal\/details\/(\d+)/);
   return m ? m[1] : '';
@@ -42,34 +45,32 @@ function dealSliderFrames(page, dealId) {
 async function closeDealPanel(page, dealId) {
   if (!dealId || page.isClosed()) return;
 
-  for (let attempt = 0; attempt < 4; attempt++) {
+  const closeTimeout = config.sidePanelCloseTimeoutMs || (process.platform === 'win32' ? 2500 : 3500);
+
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      await page.keyboard.press('Escape');
+      const close = page.locator(CLOSE_SEL).first();
+      if (await close.isVisible({ timeout: 200 }).catch(() => false)) {
+        await close.click({ timeout: 1000 }).catch(() => {});
+      } else {
+        await page.keyboard.press('Escape');
+      }
     } catch {
       return;
     }
 
     const gone = await waitUntil(
       async () => dealSliderFrames(page, dealId).length === 0,
-      { timeoutMs: process.platform === 'win32' ? 1800 : 2500, intervalMs: 80 }
+      { timeoutMs: Math.min(1200, closeTimeout), intervalMs: 80 }
     );
     if (gone) {
       logStep('iframe', `закрыт slider #${dealId}`);
+      // короткая пауза — iframe успевает отцепиться до следующей сделки
+      await settleAfterAction(null, {
+        minMs: Math.min(150, config.uiSettleMs || 200),
+        maxMs: Math.min(250, config.uiSettleMs || 200),
+      });
       return;
-    }
-
-    // клик по крестику панели, если Escape не схватил
-    try {
-      const close = page
-        .locator(
-          '.side-panel-label-icon-close, .side-panel-close, [class*="side-panel"] .ui-icon-btn-close'
-        )
-        .first();
-      if (await close.isVisible({ timeout: 200 }).catch(() => false)) {
-        await close.click({ timeout: 1000 }).catch(() => {});
-      }
-    } catch {
-      // ignore
     }
   }
   logWarn(`не удалось дождаться закрытия slider #${dealId}`);
@@ -449,22 +450,21 @@ async function readFieldByTextFallback(frame, label) {
  * Заполненные суммы из граф затрат (поставщики, доп.расходы, доставка…).
  * Пустые / «не заполнено» / 0 пропускаем.
  */
-async function readCostFieldsFromFrame(frame, labelHints = []) {
-  const fields = await readFieldsFromFrame(frame);
+/** optsOrFields: уже прочитанная карта полей — не дергаем DOM второй раз. */
+async function readCostFieldsFromFrame(frame, labelHints = [], optsOrFields) {
+  const fields =
+    optsOrFields && typeof optsOrFields === 'object' && !Array.isArray(optsOrFields)
+      ? optsOrFields
+      : await readFieldsFromFrame(frame);
   const hints = (labelHints || []).map((h) => String(h).toLowerCase());
   const list = [];
 
   for (const [label, valueText] of Object.entries(fields)) {
     const low = label.toLowerCase();
-    const matched = hints.some((h) => low.includes(h) || new RegExp(`^${h}\\s*\\d+$`, 'i').test(label));
-    if (!matched) continue;
-    if (!valueText) continue;
-    if (/не заполнено|указать|выбрать/i.test(valueText)) continue;
-
+    if (!hints.some((h) => low.includes(h) || new RegExp(`^${h}\\s*\\d+$`, 'i').test(label))) continue;
+    if (!valueText || /не заполнено|указать|выбрать/i.test(valueText)) continue;
     const amount = parseMoney(valueText);
-    if (amount === null) continue;
-    if (Math.abs(amount) < 0.0001) continue; // ноль не участвует в сверке
-
+    if (amount === null || Math.abs(amount) < 0.0001) continue;
     list.push({ label, valueText, amount });
   }
 
@@ -600,6 +600,16 @@ async function findPaymentTasksInFrame(frame, hints, dealName, options = {}) {
           const fileName = (a.textContent || '').replace(/\s+/g, ' ').trim();
           const key = href || fileName;
           if (!key || seenHref.has(key)) continue;
+          // исходящий счёт заказчику в превью задачи не берём в сверку поставщиков
+          // (логика совпадает с src/invoiceFilters.js — в frame.evaluate нет require)
+          const low = fileName.toLowerCase().replace(/ё/g, 'е');
+          if (
+            low.includes('исходящ') ||
+            /сч[её]т\s+на\s+оплату\s+№\s*ю\d{2}/i.test(low) ||
+            /сч[её]т\s+на\s+оплату\s+№\s*(нал|qr)[-–]?\s*ю?/i.test(low)
+          ) {
+            continue;
+          }
           seenHref.add(key);
           files.push({ fileName, fileHref: href });
         }
@@ -692,8 +702,7 @@ async function readTimelineComments(frame) {
           low.includes('сдек') ||
           low.includes('эквайринг') ||
           low.includes('эквайр') ||
-          /3\s*%/.test(low) ||
-          low.includes('транспорт')) &&
+          /3\s*%/.test(low)) &&
         !out.some((t) => norm(t).includes(low) || low.includes(norm(t).slice(0, 40)))
       ) {
         out.push(line);

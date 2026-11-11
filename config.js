@@ -35,8 +35,14 @@ module.exports = {
   uiSettleMs: isWin ? 250 : 400,
   uiSettleTimeoutMs: isWin ? 2500 : 4000,
 
-  // подробный dump iframe — только при verbose / DEBUG_DIAG=1
-  frameDiagnostics: false,
+  /**
+   * Fail-fast на Windows: не жечь 15–20 с на каждый провал download / задачу.
+   * Лучше быстро null и идти дальше, чем минуты «зависаний».
+   */
+  downloadTimeoutMs: isWin ? 15000 : 20000,
+  panelDownloadTimeoutMs: isWin ? 12000 : 15000,
+  warehouseOpenTimeoutMs: isWin ? 8000 : 10000,
+  sidePanelCloseTimeoutMs: isWin ? 2500 : 3500,
 
   dealNameLabel: 'Название',
   closeMonthLabel: 'Месяц завершения сделки',
@@ -56,7 +62,7 @@ module.exports = {
 
   warehouseTaskHint: 'списание со склада',
   // любые формулировки задачи списания
-  warehouseTaskHints: ['списание со склада', 'списание со склад', 'списание товара', 'списание'],
+  warehouseTaskHints: ['списание со склада', 'списание со склад', 'списание товара'],
   // В тексте задачи списания берём ТОЛЬКО «сумма» / «всего» (не «цена»).
   // Деньги: 1 234,56 / 1234.56 / 1234
   warehouseMoneyToken:
@@ -77,8 +83,6 @@ module.exports = {
     /3\s*%\s*(?:за\s*)?(?:терминал|картой|безнал)/i,
     /эквайринг/i,
   ],
-  // старое поле — на случай ручных конфигов
-  acquiringCommentRegex: /эквайринг/i,
 
   costFieldLabels: [
     'Поставщик',
@@ -92,7 +96,11 @@ module.exports = {
 
   // округление Битрикса / копейки: ±1 ₽
   amountTolerance: 1,
-  acceptMatchingTotals: true,
+  /**
+   * false: наборы сумм должны совпасть поэлементно.
+   * true: достаточно совпадения ИТОГО (скрывает разные составы сумм — опасно).
+   */
+  acceptMatchingTotals: false,
 
   /**
    * Минимальная сумма из счетов / СДЭК / «свободного» парсинга.
@@ -114,15 +122,15 @@ module.exports = {
   acquiringMatchFromCostFields: true,
 
   /**
-   * Счёт заказчику — только факт наличия в ленте.
-   * Сумму из него ни с чем не сверяем (с графами сверяются предоплата/постоплата).
-   */
-  checkClientInvoiceAmount: false,
-
-  /**
-   * Скачивание счетов поставщику нужно для сверки сумм.
-   * На Windows антивирус сильно тормозит — при необходимости поставьте false
-   * (проверка станет быстрее, но без сумм из файлов счетов).
+   * Счета поставщику всегда скачиваем и сверяем с графами затрат.
+   * Из ленты берём только СДЭК и эквайринг — не подмену сумм счетов.
+   * false ускорит прогон, но сверка станет бессмысленной.
    */
   downloadSupplierInvoices: true,
+
+  /** Кэш скачанных файлов и разобранных сумм в рамках одного запуска. */
+  cacheInvoiceFiles: true,
+  /** Параллельная загрузка счетов по href (2 на Windows безопаснее для антивируса). */
+  // на Windows параллель >1 часто даёт timeout/Invalid URL на disk.uf
+  invoiceFetchConcurrency: 1,
 };

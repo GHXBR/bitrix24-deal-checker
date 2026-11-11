@@ -67,11 +67,19 @@ function parseMoney(text) {
   return Number.isFinite(value) ? value : null;
 }
 
-/** Отсекает р/с, ИНН и склейки цифр — не суммы счетов. */
+/**
+ * Отсекает р/с, ИНН, телефоны, номера документов — не суммы счетов.
+ * Целые ≥ 8 цифр (502401001) почти никогда не бывают итогом счёта в этой сверке.
+ */
 function isPlausibleMoney(v) {
   if (v === null || v === undefined || !Number.isFinite(v)) return false;
-  if (v < 1 || v >= 1e9) return false;
-  if (String(Math.trunc(Math.abs(v))).length > 9) return false;
+  if (v < 1 || v >= 1e8) return false; // > 99.9 млн — не наш масштаб сделок
+  const intDigits = String(Math.trunc(Math.abs(v))).length;
+  if (intDigits > 7) return false;
+  // длинное целое без копеек (р/с / ИНН-куски) — не сумма счёта
+  if (Number.isInteger(v) && intDigits >= 8) return false;
+  // 7-значные целые вроде 9731107 — почти всегда обрубок ИНН, не итог
+  if (Number.isInteger(v) && intDigits === 7 && v >= 1_000_000) return false;
   if (v >= 2000 && v <= 2100 && Number.isInteger(v)) return false; // год
   return true;
 }
@@ -106,7 +114,23 @@ function sanitizeSourceEntries(entries, fieldAmounts, opts = {}) {
       dropped.push({ ...entry, reason: `ниже минимума ${min}` });
       continue;
     }
-    if (dropOrphans && maxRef > 0 && a <= orphanMax && a < maxRef * orphanRatio) {
+    // мусор вроде р/с 502401001, если графы на порядки меньше
+    if (fields.length) {
+      const maxField = Math.max(...fields);
+      if (maxField > 0 && a > maxField * 2.5) {
+        dropped.push({ ...entry, reason: `далеко выше граф (≤${maxField})` });
+        continue;
+      }
+    }
+    // реальные счета/списания не выкидываем как «сирот» — иначе скрываем рассинхрон
+    const fromInvoice = /сч[её]т|списание/i.test(String(entry.origin || ''));
+    if (
+      dropOrphans &&
+      !fromInvoice &&
+      maxRef > 0 &&
+      a <= orphanMax &&
+      a < maxRef * orphanRatio
+    ) {
       dropped.push({ ...entry, reason: 'мелкая сирота без пары в графах' });
       continue;
     }
@@ -131,6 +155,10 @@ function amountsEqual(a, b, tolerance = 0.05) {
   if (a === null || b === null) return false;
   return Math.abs(a - b) <= tolerance;
 }
+
+/** Общий токен суммы (группы тысяч / копейки). */
+const MONEY_TOKEN =
+  '([0-9]{1,3}(?:[\\s\\u00A0][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+[.,][0-9]{2}|[0-9]{2,7}(?:[.,][0-9]{1,2})?)';
 
 /** Сравнение наборов сумм как мультимножества (порядок не важен). */
 function compareAmountSets(sourceAmounts, fieldAmounts, tolerance = 0.05) {
@@ -191,11 +219,6 @@ function waitForEnter(message) {
   return ask(message || 'Нажмите Enter, когда будете готовы продолжить...');
 }
 
-function formatMoney(n) {
-  if (n === null || n === undefined || !Number.isFinite(n)) return '';
-  return String(n);
-}
-
 module.exports = {
   sleep,
   waitUntil,
@@ -209,5 +232,5 @@ module.exports = {
   compareAmountSets,
   ask,
   waitForEnter,
-  formatMoney,
+  MONEY_TOKEN,
 };

@@ -1,41 +1,9 @@
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
 const config = require('../config');
+const { sanitizeSourceEntries } = require('../src/utils');
 const {
-  normalize,
-  parseMoney,
-  isPlausibleMoney,
-  sanitizeSourceEntries,
-  amountsEqual,
-} = require('../src/utils');
-
-const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'deal.js'), 'utf8');
-const sandbox = {
-  config,
-  normalize,
-  parseMoney,
-  isPlausibleMoney,
-  amountsEqual,
-  logWarn() {},
-  console,
-};
-vm.createContext(sandbox);
-
-function loadRange(startMarker, endMarker) {
-  const start = src.indexOf(startMarker);
-  const end = src.indexOf(endMarker, start + 1);
-  if (start < 0 || end < 0) throw new Error(`range not found: ${startMarker}`);
-  vm.runInContext(src.slice(start, end), sandbox);
-}
-
-loadRange('function shouldSkipClientInvoice', 'async function readDealCardData');
-loadRange('function acquiringCommentHit', 'function extractLabeledAmount');
-vm.runInContext(
-  'this.parseDealAmountFromTitle=parseDealAmountFromTitle;' +
-    'this.extractAcquiringFeesFromComments=extractAcquiringFeesFromComments;',
-  sandbox
-);
+  parseDealAmountFromTitle,
+  extractAcquiringFeesFromComments,
+} = require('../src/moneySources');
 
 let fail = 0;
 function assert(name, cond, detail) {
@@ -46,17 +14,17 @@ function assert(name, cond, detail) {
   }
 }
 
-assert('title 2900', sandbox.parseDealAmountFromTitle('Нал-Ю26-2900') === 2900);
-assert('title 4800', sandbox.parseDealAmountFromTitle('Нал-Ю26-4800') === 4800);
-assert('title 27500', sandbox.parseDealAmountFromTitle('Нал-Ю26-27500') === 27500);
+assert('title 2900', parseDealAmountFromTitle('Нал-Ю26-2900') === 2900);
+assert('title 4800', parseDealAmountFromTitle('Нал-Ю26-4800') === 4800);
+assert('title 27500', parseDealAmountFromTitle('Нал-Ю26-27500') === 27500);
 
-const acq = sandbox.extractAcquiringFeesFromComments([], 2900, [87, 595.98]);
+const acq = extractAcquiringFeesFromComments([], 2900, [87, 595.98]);
 assert('acq from field 87', acq.length === 1 && acq[0].amount === 87 && acq[0].fromField);
 
-const acq2 = sandbox.extractAcquiringFeesFromComments([], 27500, [825, 28500]);
+const acq2 = extractAcquiringFeesFromComments([], 27500, [825, 28500]);
 assert('acq from field 825', acq2.length === 1 && acq2[0].amount === 825);
 
-const acq3 = sandbox.extractAcquiringFeesFromComments([], 53100, [50922.19]);
+const acq3 = extractAcquiringFeesFromComments([], 53100, [50922.19]);
 assert('acq absent if no 3% in fields/comments', acq3.length === 0);
 
 const s = sanitizeSourceEntries(
