@@ -16,11 +16,11 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 public static class Theme {
-  // Фирменные цвета (как на сайте): красный акцент, светлый фон, тёмный текст.
-  public static readonly Color Brand = Color.FromArgb(185, 34, 34);
-  public static readonly Color BrandHot = Color.FromArgb(160, 28, 28);
-  public static readonly Color BrandDeep = Color.FromArgb(130, 20, 20);
-  public static readonly Color BrandSoft = Color.FromArgb(255, 236, 236);
+  // Фирменный красный чуть темнее и спокойнее.
+  public static readonly Color Brand = Color.FromArgb(158, 28, 28);
+  public static readonly Color BrandHot = Color.FromArgb(138, 22, 22);
+  public static readonly Color BrandDeep = Color.FromArgb(112, 16, 16);
+  public static readonly Color BrandSoft = Color.FromArgb(248, 232, 232);
   public static readonly Color Canvas = Color.FromArgb(247, 248, 250);
   public static readonly Color Surface = Color.White;
   public static readonly Color Ink = Color.FromArgb(24, 24, 24);
@@ -31,8 +31,8 @@ public static class Theme {
   public static readonly Color GhostHot = Color.FromArgb(248, 249, 251);
   public static readonly Color OkBg = Color.FromArgb(232, 245, 236);
   public static readonly Color OkFg = Color.FromArgb(28, 110, 60);
-  public static readonly Color RunBg = Color.FromArgb(255, 236, 236);
-  public static readonly Color RunFg = Color.FromArgb(160, 28, 28);
+  public static readonly Color RunBg = Color.FromArgb(248, 232, 232);
+  public static readonly Color RunFg = Color.FromArgb(138, 22, 22);
   public static readonly Color WarnBg = Color.FromArgb(255, 243, 220);
   public static readonly Color WarnFg = Color.FromArgb(146, 90, 12);
 }
@@ -48,9 +48,21 @@ public static class Draw {
     p.CloseFigure();
     return p;
   }
-  public static void ApplyRound(Control c, int radius) {
-    using (var path = Round(new Rectangle(0, 0, Math.Max(1, c.Width), Math.Max(1, c.Height)), radius)) {
-      c.Region = new Region(path);
+
+  // Transparent у родителя в WinForms даёт чёрные углы — ищем непрозрачный цвет.
+  public static Color OpaqueBack(Control c) {
+    Control cur = c;
+    while (cur != null) {
+      Color b = cur.BackColor;
+      if (b.A == 255 && b.ToArgb() != Color.Transparent.ToArgb()) return b;
+      cur = cur.Parent;
+    }
+    return Theme.Canvas;
+  }
+
+  public static void FillBack(Graphics g, Control c) {
+    using (var br = new SolidBrush(OpaqueBack(c))) {
+      g.FillRectangle(br, c.ClientRectangle);
     }
   }
 }
@@ -68,9 +80,10 @@ public class UiButton : Button {
     Cursor = Cursors.Hand;
     Height = 40;
     Font = new Font("Segoe UI Semibold", 10f);
-    SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    // Без Region: иначе чёрные/рваные углы на Transparent-родителе.
+    SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    BackColor = Color.Transparent;
     ApplyColors();
-    Resize += (s, e) => Draw.ApplyRound(this, Height / 2);
   }
 
   void ApplyColors() {
@@ -94,13 +107,14 @@ public class UiButton : Button {
 
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+    e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
     e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+    Draw.FillBack(e.Graphics, this);
     Color fill = !Enabled ? Color.FromArgb(230, 232, 236) : (_down ? _press : (_over ? _hover : _base));
     Color text = !Enabled ? Color.FromArgb(150, 154, 162) : ForeColor;
     int radius = Math.Max(12, Height / 2);
     using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), radius))
     using (var br = new SolidBrush(fill)) {
-      e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Surface);
       e.Graphics.FillPath(br, path);
       if (!IsPrimary && Enabled) {
         using (var pen = new Pen(Theme.Line)) e.Graphics.DrawPath(pen, path);
@@ -115,11 +129,10 @@ public class SoftCard : Panel {
   public SoftCard() {
     DoubleBuffered = true;
     BackColor = Theme.Surface;
-    Resize += (s, e) => Draw.ApplyRound(this, 18);
   }
   protected override void OnPaintBackground(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Canvas);
+    Draw.FillBack(e.Graphics, this);
     using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), 18))
     using (var br = new SolidBrush(Theme.Surface))
     using (var pen = new Pen(Theme.Line)) {
@@ -135,7 +148,8 @@ public class StatusPill : Control {
   public StatusPill() {
     Height = 34;
     Font = new Font("Segoe UI Semibold", 9f);
-    SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+    SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    BackColor = Color.Transparent;
   }
   public void SetState(string text, string kind) {
     Text = text;
@@ -147,10 +161,12 @@ public class StatusPill : Control {
   }
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Canvas);
+    e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+    // Важно: не Clear(Transparent) — из этого получаются чёрные углы.
+    Draw.FillBack(e.Graphics, this);
     using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), Height / 2))
     using (var br = new SolidBrush(_bg))
-    using (var pen = new Pen(Color.FromArgb(40, _fg))) {
+    using (var pen = new Pen(Color.FromArgb(48, _fg))) {
       e.Graphics.FillPath(br, path);
       e.Graphics.DrawPath(pen, path);
     }
@@ -164,6 +180,7 @@ public class ProgressTrack : Control {
   public ProgressTrack() {
     Height = 14;
     SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    BackColor = Theme.Surface;
   }
   public double Value {
     get { return _value; }
@@ -174,7 +191,7 @@ public class ProgressTrack : Control {
   }
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Surface);
+    Draw.FillBack(e.Graphics, this);
     var rect = new Rectangle(0, 0, Width - 1, Height - 1);
     using (var path = Draw.Round(rect, Height / 2))
     using (var track = new SolidBrush(Theme.Track)) {
@@ -184,7 +201,7 @@ public class ProgressTrack : Control {
     if (fillW > 4) {
       var fillRect = new Rectangle(0, 0, fillW, Height - 1);
       using (var path = Draw.Round(fillRect, Height / 2))
-      using (var br = new LinearGradientBrush(fillRect, Theme.Brand, Theme.BrandHot, 0f)) {
+      using (var br = new SolidBrush(Theme.Brand)) {
         e.Graphics.FillPath(br, path);
       }
     }
@@ -241,7 +258,8 @@ public class DealCheckerForm : Form {
     headerHost.Width = ClientSize.Width - 68;
     headerHost.Height = 52;
     headerHost.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-    headerHost.BackColor = Color.Transparent;
+    // Не Transparent: иначе дочерние кнопки рисуют чёрные углы.
+    headerHost.BackColor = Theme.Canvas;
     Controls.Add(headerHost);
 
     var brand = new Label();
@@ -288,11 +306,11 @@ public class DealCheckerForm : Form {
     urlShell.Location = new Point(26, 44);
     urlShell.Size = new Size(card.Width - 52, 40);
     urlShell.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-    urlShell.BackColor = Color.FromArgb(250, 250, 252);
+    urlShell.BackColor = Theme.Surface;
     urlShell.Padding = new Padding(12, 8, 12, 8);
-    urlShell.Resize += (s, e) => Draw.ApplyRound(urlShell, 12);
     urlShell.Paint += (s, e) => {
       e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+      Draw.FillBack(e.Graphics, urlShell);
       using (var path = Draw.Round(new Rectangle(0, 0, urlShell.Width - 1, urlShell.Height - 1), 12))
       using (var br = new SolidBrush(Color.FromArgb(250, 250, 252)))
       using (var pen = new Pen(Theme.Line)) {
