@@ -11,29 +11,30 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 public static class Theme {
-  public static readonly Color CanvasTop = Color.FromArgb(244, 248, 252);
-  public static readonly Color CanvasBot = Color.FromArgb(226, 235, 245);
+  // Фирменные цвета (как на сайте): красный акцент, светлый фон, тёмный текст.
+  public static readonly Color Brand = Color.FromArgb(185, 34, 34);
+  public static readonly Color BrandHot = Color.FromArgb(160, 28, 28);
+  public static readonly Color BrandDeep = Color.FromArgb(130, 20, 20);
+  public static readonly Color BrandSoft = Color.FromArgb(255, 236, 236);
+  public static readonly Color Canvas = Color.FromArgb(247, 248, 250);
   public static readonly Color Surface = Color.White;
-  public static readonly Color Ink = Color.FromArgb(18, 28, 44);
-  public static readonly Color Muted = Color.FromArgb(95, 112, 136);
-  public static readonly Color Line = Color.FromArgb(214, 224, 236);
-  public static readonly Color Accent = Color.FromArgb(12, 110, 168);
-  public static readonly Color AccentHot = Color.FromArgb(8, 88, 138);
-  public static readonly Color AccentDeep = Color.FromArgb(5, 70, 114);
-  public static readonly Color Ghost = Color.FromArgb(248, 251, 254);
-  public static readonly Color GhostHot = Color.FromArgb(236, 243, 250);
-  public static readonly Color LogBg = Color.FromArgb(24, 32, 46);
-  public static readonly Color LogFg = Color.FromArgb(210, 222, 236);
-  public static readonly Color OkBg = Color.FromArgb(226, 244, 234);
-  public static readonly Color OkFg = Color.FromArgb(20, 108, 66);
-  public static readonly Color RunBg = Color.FromArgb(228, 240, 252);
-  public static readonly Color RunFg = Color.FromArgb(12, 88, 140);
-  public static readonly Color WarnBg = Color.FromArgb(255, 241, 220);
-  public static readonly Color WarnFg = Color.FromArgb(150, 88, 8);
+  public static readonly Color Ink = Color.FromArgb(24, 24, 24);
+  public static readonly Color Muted = Color.FromArgb(120, 120, 128);
+  public static readonly Color Line = Color.FromArgb(226, 228, 232);
+  public static readonly Color Track = Color.FromArgb(236, 238, 242);
+  public static readonly Color Ghost = Color.White;
+  public static readonly Color GhostHot = Color.FromArgb(248, 249, 251);
+  public static readonly Color OkBg = Color.FromArgb(232, 245, 236);
+  public static readonly Color OkFg = Color.FromArgb(28, 110, 60);
+  public static readonly Color RunBg = Color.FromArgb(255, 236, 236);
+  public static readonly Color RunFg = Color.FromArgb(160, 28, 28);
+  public static readonly Color WarnBg = Color.FromArgb(255, 243, 220);
+  public static readonly Color WarnFg = Color.FromArgb(146, 90, 12);
 }
 
 public static class Draw {
@@ -65,19 +66,19 @@ public class UiButton : Button {
     FlatStyle = FlatStyle.Flat;
     FlatAppearance.BorderSize = 0;
     Cursor = Cursors.Hand;
-    Height = 44;
-    Font = new Font("Segoe UI Semibold", 10.25f);
+    Height = 40;
+    Font = new Font("Segoe UI Semibold", 10f);
     SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
     ApplyColors();
-    Resize += (s, e) => Draw.ApplyRound(this, 11);
+    Resize += (s, e) => Draw.ApplyRound(this, Height / 2);
   }
 
   void ApplyColors() {
     if (IsPrimary) {
-      _base = Theme.Accent; _hover = Theme.AccentHot; _press = Theme.AccentDeep;
+      _base = Theme.Brand; _hover = Theme.BrandHot; _press = Theme.BrandDeep;
       ForeColor = Color.White;
     } else {
-      _base = Theme.Ghost; _hover = Theme.GhostHot; _press = Color.FromArgb(224, 232, 242);
+      _base = Theme.Ghost; _hover = Theme.GhostHot; _press = Color.FromArgb(240, 241, 244);
       ForeColor = Theme.Ink;
     }
   }
@@ -94,9 +95,10 @@ public class UiButton : Button {
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
     e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-    Color fill = !Enabled ? Color.FromArgb(220, 228, 236) : (_down ? _press : (_over ? _hover : _base));
-    Color text = !Enabled ? Color.FromArgb(140, 150, 165) : ForeColor;
-    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), 11))
+    Color fill = !Enabled ? Color.FromArgb(230, 232, 236) : (_down ? _press : (_over ? _hover : _base));
+    Color text = !Enabled ? Color.FromArgb(150, 154, 162) : ForeColor;
+    int radius = Math.Max(12, Height / 2);
+    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), radius))
     using (var br = new SolidBrush(fill)) {
       e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Surface);
       e.Graphics.FillPath(br, path);
@@ -113,12 +115,12 @@ public class SoftCard : Panel {
   public SoftCard() {
     DoubleBuffered = true;
     BackColor = Theme.Surface;
-    Resize += (s, e) => Draw.ApplyRound(this, 16);
+    Resize += (s, e) => Draw.ApplyRound(this, 18);
   }
   protected override void OnPaintBackground(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.CanvasTop);
-    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), 16))
+    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Canvas);
+    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), 18))
     using (var br = new SolidBrush(Theme.Surface))
     using (var pen = new Pen(Theme.Line)) {
       e.Graphics.FillPath(br, path);
@@ -131,7 +133,7 @@ public class StatusPill : Control {
   Color _bg = Theme.OkBg;
   Color _fg = Theme.OkFg;
   public StatusPill() {
-    Height = 30;
+    Height = 34;
     Font = new Font("Segoe UI Semibold", 9f);
     SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
   }
@@ -140,24 +142,60 @@ public class StatusPill : Control {
     if (kind == "run") { _bg = Theme.RunBg; _fg = Theme.RunFg; }
     else if (kind == "warn") { _bg = Theme.WarnBg; _fg = Theme.WarnFg; }
     else { _bg = Theme.OkBg; _fg = Theme.OkFg; }
-    Width = Math.Max(132, TextRenderer.MeasureText(Text, Font).Width + 28);
+    Width = Math.Max(140, TextRenderer.MeasureText(Text, Font).Width + 32);
     Invalidate();
   }
   protected override void OnPaint(PaintEventArgs e) {
     e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.CanvasTop);
-    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), 15))
-    using (var br = new SolidBrush(_bg)) {
+    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Canvas);
+    using (var path = Draw.Round(new Rectangle(0, 0, Width - 1, Height - 1), Height / 2))
+    using (var br = new SolidBrush(_bg))
+    using (var pen = new Pen(Color.FromArgb(40, _fg))) {
       e.Graphics.FillPath(br, path);
+      e.Graphics.DrawPath(pen, path);
     }
     TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, _fg,
       TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
   }
 }
 
+public class ProgressTrack : Control {
+  double _value;
+  public ProgressTrack() {
+    Height = 14;
+    SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+  }
+  public double Value {
+    get { return _value; }
+    set {
+      _value = Math.Max(0, Math.Min(1, value));
+      Invalidate();
+    }
+  }
+  protected override void OnPaint(PaintEventArgs e) {
+    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+    e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Surface);
+    var rect = new Rectangle(0, 0, Width - 1, Height - 1);
+    using (var path = Draw.Round(rect, Height / 2))
+    using (var track = new SolidBrush(Theme.Track)) {
+      e.Graphics.FillPath(track, path);
+    }
+    int fillW = (int)Math.Round((Width - 1) * _value);
+    if (fillW > 4) {
+      var fillRect = new Rectangle(0, 0, fillW, Height - 1);
+      using (var path = Draw.Round(fillRect, Height / 2))
+      using (var br = new LinearGradientBrush(fillRect, Theme.Brand, Theme.BrandHot, 0f)) {
+        e.Graphics.FillPath(br, path);
+      }
+    }
+  }
+}
+
 public class DealCheckerForm : Form {
   TextBox urlBox;
-  RichTextBox logBox;
+  Label dealLabel;
+  Label progressLabel;
+  ProgressTrack progressBar;
   UiButton startBtn;
   UiButton stopBtn;
   UiButton updateBtn;
@@ -166,32 +204,42 @@ public class DealCheckerForm : Form {
   string appRoot;
   string nodePath;
   Panel headerHost;
+  int totalDeals;
+  int currentDeal;
+
+  static readonly Regex DealLine = new Regex(
+    @"\[(\d+)\s*/\s*(\d+)\]\s*#(\d+)\s+(.+?)\s+[—\-]",
+    RegexOptions.Compiled
+  );
+  static readonly Regex FoundDeals = new Regex(
+    @"Найдено сделок:\s*(\d+)",
+    RegexOptions.Compiled | RegexOptions.IgnoreCase
+  );
 
   public DealCheckerForm(string root, string node) {
     appRoot = root;
     nodePath = node;
     Text = "Проверка сделок";
-    Width = 920;
-    Height = 700;
-    MinimumSize = new Size(780, 580);
+    Width = 860;
+    Height = 520;
+    MinimumSize = new Size(720, 460);
     StartPosition = FormStartPosition.CenterScreen;
     Font = new Font("Segoe UI", 10f);
-    BackColor = Theme.CanvasTop;
+    BackColor = Theme.Canvas;
     DoubleBuffered = true;
 
     Paint += (s, e) => {
-      using (var br = new LinearGradientBrush(ClientRectangle, Theme.CanvasTop, Theme.CanvasBot, 105f))
+      using (var br = new SolidBrush(Theme.Canvas))
         e.Graphics.FillRectangle(br, ClientRectangle);
-      using (var accent = new LinearGradientBrush(new Rectangle(0, 0, 7, Height),
-        Color.FromArgb(12, 110, 168), Color.FromArgb(64, 176, 198), 90f))
-        e.Graphics.FillRectangle(accent, 0, 0, 7, Height);
+      using (var accent = new SolidBrush(Theme.Brand))
+        e.Graphics.FillRectangle(accent, 0, 0, 6, Height);
     };
 
     headerHost = new Panel();
     headerHost.Left = 34;
-    headerHost.Top = 26;
+    headerHost.Top = 28;
     headerHost.Width = ClientSize.Width - 68;
-    headerHost.Height = 78;
+    headerHost.Height = 52;
     headerHost.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
     headerHost.BackColor = Color.Transparent;
     Controls.Add(headerHost);
@@ -201,21 +249,12 @@ public class DealCheckerForm : Form {
     brand.Font = new Font("Segoe UI Semibold", 24f, FontStyle.Bold);
     brand.ForeColor = Theme.Ink;
     brand.AutoSize = true;
-    brand.Location = new Point(0, 0);
+    brand.Location = new Point(0, 6);
     brand.BackColor = Color.Transparent;
     headerHost.Controls.Add(brand);
 
-    var sub = new Label();
-    sub.Text = "Битрикс24  ·  только чтение  ·  Excel-отчёт";
-    sub.Font = new Font("Segoe UI", 10.25f);
-    sub.ForeColor = Theme.Muted;
-    sub.AutoSize = true;
-    sub.Location = new Point(2, 46);
-    sub.BackColor = Color.Transparent;
-    headerHost.Controls.Add(sub);
-
     updateBtn = new UiButton("Обновления", false);
-    updateBtn.Width = 118;
+    updateBtn.Width = 124;
     updateBtn.Height = 34;
     updateBtn.Top = 8;
     updateBtn.Click += async (s, e) => await CheckUpdates(true);
@@ -223,16 +262,16 @@ public class DealCheckerForm : Form {
 
     statusPill = new StatusPill();
     statusPill.SetState("Готово к работе", "ok");
-    statusPill.Top = 10;
+    statusPill.Top = 9;
     statusPill.Anchor = AnchorStyles.Top | AnchorStyles.Right;
     headerHost.Controls.Add(statusPill);
     headerHost.Resize += (s, e) => LayoutHeader();
 
     var card = new SoftCard();
     card.Left = 34;
-    card.Top = 112;
+    card.Top = 96;
     card.Width = ClientSize.Width - 68;
-    card.Height = 156;
+    card.Height = 150;
     card.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
     Controls.Add(card);
 
@@ -241,21 +280,21 @@ public class DealCheckerForm : Form {
     urlLabel.Font = new Font("Segoe UI Semibold", 8.5f);
     urlLabel.ForeColor = Theme.Muted;
     urlLabel.AutoSize = true;
-    urlLabel.Location = new Point(26, 22);
+    urlLabel.Location = new Point(26, 20);
     urlLabel.BackColor = Theme.Surface;
     card.Controls.Add(urlLabel);
 
     var urlShell = new Panel();
-    urlShell.Location = new Point(26, 48);
+    urlShell.Location = new Point(26, 44);
     urlShell.Size = new Size(card.Width - 52, 40);
     urlShell.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-    urlShell.BackColor = Color.FromArgb(248, 251, 254);
+    urlShell.BackColor = Color.FromArgb(250, 250, 252);
     urlShell.Padding = new Padding(12, 8, 12, 8);
-    urlShell.Resize += (s, e) => Draw.ApplyRound(urlShell, 10);
+    urlShell.Resize += (s, e) => Draw.ApplyRound(urlShell, 12);
     urlShell.Paint += (s, e) => {
       e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-      using (var path = Draw.Round(new Rectangle(0, 0, urlShell.Width - 1, urlShell.Height - 1), 10))
-      using (var br = new SolidBrush(Color.FromArgb(248, 251, 254)))
+      using (var path = Draw.Round(new Rectangle(0, 0, urlShell.Width - 1, urlShell.Height - 1), 12))
+      using (var br = new SolidBrush(Color.FromArgb(250, 250, 252)))
       using (var pen = new Pen(Theme.Line)) {
         e.Graphics.FillPath(br, path);
         e.Graphics.DrawPath(pen, path);
@@ -265,63 +304,68 @@ public class DealCheckerForm : Form {
 
     urlBox = new TextBox();
     urlBox.BorderStyle = BorderStyle.None;
-    urlBox.Font = new Font("Segoe UI", 11.25f);
+    urlBox.Font = new Font("Segoe UI", 11f);
     urlBox.Dock = DockStyle.Fill;
-    urlBox.BackColor = Color.FromArgb(248, 251, 254);
+    urlBox.BackColor = Color.FromArgb(250, 250, 252);
     urlBox.ForeColor = Theme.Ink;
     urlShell.Controls.Add(urlBox);
 
     startBtn = new UiButton("Запустить", true);
-    startBtn.Width = 160;
+    startBtn.Width = 150;
     startBtn.Location = new Point(26, 98);
     startBtn.Click += async (s, e) => await StartCheck();
     card.Controls.Add(startBtn);
 
     stopBtn = new UiButton("Остановить", false);
-    stopBtn.Width = 132;
-    stopBtn.Location = new Point(198, 98);
+    stopBtn.Width = 130;
+    stopBtn.Location = new Point(188, 98);
     stopBtn.Enabled = false;
     stopBtn.Click += (s, e) => StopCheck();
     card.Controls.Add(stopBtn);
 
-    var logCard = new SoftCard();
-    logCard.Left = 34;
-    logCard.Top = 284;
-    logCard.Width = ClientSize.Width - 68;
-    logCard.Height = ClientSize.Height - 318;
-    logCard.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-    Controls.Add(logCard);
+    var progressCard = new SoftCard();
+    progressCard.Left = 34;
+    progressCard.Top = 266;
+    progressCard.Width = ClientSize.Width - 68;
+    progressCard.Height = 170;
+    progressCard.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+    Controls.Add(progressCard);
 
-    var logTitle = new Label();
-    logTitle.Text = "ХОД ПРОВЕРКИ";
-    logTitle.Font = new Font("Segoe UI Semibold", 8.5f);
-    logTitle.ForeColor = Theme.Muted;
-    logTitle.AutoSize = true;
-    logTitle.Location = new Point(26, 18);
-    logTitle.BackColor = Theme.Surface;
-    logCard.Controls.Add(logTitle);
+    var progressTitle = new Label();
+    progressTitle.Text = "ХОД ПРОВЕРКИ";
+    progressTitle.Font = new Font("Segoe UI Semibold", 8.5f);
+    progressTitle.ForeColor = Theme.Muted;
+    progressTitle.AutoSize = true;
+    progressTitle.Location = new Point(26, 22);
+    progressTitle.BackColor = Theme.Surface;
+    progressCard.Controls.Add(progressTitle);
 
-    var logShell = new Panel();
-    logShell.Location = new Point(22, 44);
-    logShell.Size = new Size(logCard.Width - 44, logCard.Height - 66);
-    logShell.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-    logShell.BackColor = Theme.LogBg;
-    logShell.Resize += (s, e) => Draw.ApplyRound(logShell, 12);
-    logCard.Controls.Add(logShell);
+    dealLabel = new Label();
+    dealLabel.Text = "Ожидание запуска";
+    dealLabel.Font = new Font("Segoe UI Semibold", 16f);
+    dealLabel.ForeColor = Theme.Ink;
+    dealLabel.AutoSize = false;
+    dealLabel.Location = new Point(26, 54);
+    dealLabel.Size = new Size(progressCard.Width - 52, 36);
+    dealLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+    dealLabel.BackColor = Theme.Surface;
+    progressCard.Controls.Add(dealLabel);
 
-    logBox = new RichTextBox();
-    logBox.BorderStyle = BorderStyle.None;
-    logBox.ReadOnly = true;
-    logBox.BackColor = Theme.LogBg;
-    logBox.ForeColor = Theme.LogFg;
-    try { logBox.Font = new Font("Cascadia Mono", 9.75f); }
-    catch { logBox.Font = new Font("Consolas", 9.75f); }
-    logBox.Location = new Point(14, 12);
-    logBox.Width = logShell.Width - 28;
-    logBox.Height = logShell.Height - 24;
-    logBox.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-    logBox.DetectUrls = false;
-    logShell.Controls.Add(logBox);
+    progressLabel = new Label();
+    progressLabel.Text = "0 / 0";
+    progressLabel.Font = new Font("Segoe UI", 10f);
+    progressLabel.ForeColor = Theme.Muted;
+    progressLabel.AutoSize = true;
+    progressLabel.Location = new Point(26, 98);
+    progressLabel.BackColor = Theme.Surface;
+    progressCard.Controls.Add(progressLabel);
+
+    progressBar = new ProgressTrack();
+    progressBar.Location = new Point(26, 128);
+    progressBar.Size = new Size(progressCard.Width - 52, 14);
+    progressBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+    progressBar.Value = 0;
+    progressCard.Controls.Add(progressBar);
 
     FormClosing += (s, e) => {
       if (running != null && !running.HasExited) {
@@ -329,16 +373,12 @@ public class DealCheckerForm : Form {
       }
     };
 
-    Shown += (s, e) => {
-      LayoutHeader();
-      AppendLog("Папка: " + appRoot);
-      AppendLog("Node: " + nodePath);
-    };
+    Shown += (s, e) => LayoutHeader();
   }
 
   void LayoutHeader() {
     statusPill.Left = Math.Max(0, headerHost.Width - statusPill.Width);
-    updateBtn.Left = Math.Max(0, statusPill.Left - updateBtn.Width - 10);
+    updateBtn.Left = Math.Max(0, statusPill.Left - updateBtn.Width - 12);
   }
 
   void SetStatus(string text, string kind) {
@@ -347,17 +387,49 @@ public class DealCheckerForm : Form {
     LayoutHeader();
   }
 
-  void AppendLog(string line) {
-    if (InvokeRequired) { BeginInvoke(new Action(() => AppendLog(line))); return; }
-    if (logBox.TextLength > 200000) logBox.Clear();
-    logBox.SelectionStart = logBox.TextLength;
-    logBox.SelectionColor = Theme.LogFg;
-    if (line.StartsWith("✗") || line.IndexOf("Ошибка", StringComparison.OrdinalIgnoreCase) >= 0)
-      logBox.SelectionColor = Color.FromArgb(255, 168, 158);
-    else if (line.StartsWith("===") || line.IndexOf("Готово", StringComparison.OrdinalIgnoreCase) >= 0)
-      logBox.SelectionColor = Color.FromArgb(126, 214, 180);
-    logBox.AppendText(line + "\n");
-    logBox.ScrollToCaret();
+  void ResetProgress() {
+    totalDeals = 0;
+    currentDeal = 0;
+    dealLabel.Text = "Подготовка...";
+    progressLabel.Text = "0 / 0";
+    progressBar.Value = 0;
+  }
+
+  void HandleOutputLine(string line) {
+    if (InvokeRequired) { BeginInvoke(new Action(() => HandleOutputLine(line))); return; }
+    if (string.IsNullOrWhiteSpace(line)) return;
+
+    var found = FoundDeals.Match(line);
+    if (found.Success) {
+      totalDeals = int.Parse(found.Groups[1].Value);
+      currentDeal = 0;
+      dealLabel.Text = "Найдено сделок: " + totalDeals;
+      progressLabel.Text = "0 / " + totalDeals;
+      progressBar.Value = 0;
+      return;
+    }
+
+    var deal = DealLine.Match(line);
+    if (deal.Success) {
+      currentDeal = int.Parse(deal.Groups[1].Value);
+      totalDeals = int.Parse(deal.Groups[2].Value);
+      string id = deal.Groups[3].Value;
+      string title = deal.Groups[4].Value.Trim();
+      dealLabel.Text = "#" + id + "  " + title;
+      progressLabel.Text = currentDeal + " / " + totalDeals;
+      progressBar.Value = totalDeals > 0 ? (double)currentDeal / totalDeals : 0;
+      return;
+    }
+
+    if (line.IndexOf("Открываю браузер", StringComparison.OrdinalIgnoreCase) >= 0) {
+      dealLabel.Text = "Открываю браузер...";
+      return;
+    }
+    if (line.IndexOf("Excel", StringComparison.OrdinalIgnoreCase) >= 0 ||
+        line.IndexOf("Готово", StringComparison.OrdinalIgnoreCase) >= 0) {
+      dealLabel.Text = "Формирую Excel-отчёт...";
+      if (totalDeals > 0) progressBar.Value = 1;
+    }
   }
 
   async Task StartCheck() {
@@ -371,8 +443,7 @@ public class DealCheckerForm : Form {
     startBtn.Enabled = false;
     stopBtn.Enabled = true;
     SetStatus("Идёт проверка", "run");
-    AppendLog("");
-    AppendLog("=== Запуск ===");
+    ResetProgress();
 
     try {
       var psi = new ProcessStartInfo();
@@ -392,8 +463,8 @@ public class DealCheckerForm : Form {
       running = new Process();
       running.StartInfo = psi;
       running.EnableRaisingEvents = true;
-      running.OutputDataReceived += (s, e) => { if (e.Data != null) AppendLog(e.Data); };
-      running.ErrorDataReceived += (s, e) => { if (e.Data != null) AppendLog(e.Data); };
+      running.OutputDataReceived += (s, e) => { if (e.Data != null) HandleOutputLine(e.Data); };
+      running.ErrorDataReceived += (s, e) => { if (e.Data != null) HandleOutputLine(e.Data); };
 
       var tcs = new TaskCompletionSource<int>();
       running.Exited += (s, e) => tcs.TrySetResult(running.ExitCode);
@@ -402,10 +473,19 @@ public class DealCheckerForm : Form {
       running.BeginErrorReadLine();
 
       int code = await tcs.Task;
-      AppendLog("=== Завершено (код " + code + ") ===");
-      SetStatus(code == 0 ? "Готово" : "Ошибка", code == 0 ? "ok" : "warn");
+      if (code == 0) {
+        dealLabel.Text = "Готово — отчёт в Excel";
+        if (totalDeals > 0) {
+          progressLabel.Text = totalDeals + " / " + totalDeals;
+          progressBar.Value = 1;
+        }
+        SetStatus("Готово", "ok");
+      } else {
+        dealLabel.Text = "Проверка завершилась с ошибкой";
+        SetStatus("Ошибка", "warn");
+      }
     } catch (Exception ex) {
-      AppendLog("Ошибка: " + ex.Message);
+      dealLabel.Text = "Ошибка запуска";
       SetStatus("Ошибка запуска", "warn");
       MessageBox.Show(this, ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
     } finally {
@@ -419,11 +499,11 @@ public class DealCheckerForm : Form {
     try {
       if (running != null && !running.HasExited) {
         running.Kill();
-        AppendLog("Остановлено пользователем.");
+        dealLabel.Text = "Остановлено";
         SetStatus("Остановлено", "warn");
       }
     } catch (Exception ex) {
-      AppendLog("Не удалось остановить: " + ex.Message);
+      MessageBox.Show(this, "Не удалось остановить: " + ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
   }
 
@@ -434,7 +514,6 @@ public class DealCheckerForm : Form {
       string json = await RunNodeJson("\"" + Path.Combine(appRoot, "scripts", "update-cli.js") + "\" check");
       var status = ParseUpdate(json);
       if (!status.Ok) {
-        AppendLog("Не удалось проверить обновления: " + status.Error);
         if (interactive) MessageBox.Show(this, status.Error, "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         return;
       }
@@ -444,15 +523,14 @@ public class DealCheckerForm : Form {
 
       if (!status.Available) {
         SetStatus("Актуально · " + shortLocal, "ok");
-        if (interactive) MessageBox.Show(this, "У вас уже последняя версия с GitHub.", "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        if (interactive) {
+          MessageBox.Show(this, "У вас уже последняя версия с GitHub.", "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
         return;
       }
 
       SetStatus("Есть обновление · " + shortRemote, "warn");
-      if (!interactive) {
-        AppendLog("Доступно обновление с GitHub: " + shortRemote + " — " + status.Message);
-        return;
-      }
+      if (!interactive) return;
 
       var ask = MessageBox.Show(
         this,
@@ -463,25 +541,21 @@ public class DealCheckerForm : Form {
       );
       if (ask != DialogResult.Yes) return;
 
-      AppendLog("Устанавливаю обновление...");
       SetStatus("Устанавливаю", "run");
+      dealLabel.Text = "Устанавливаю обновление...";
       string applyJson = await RunNodeJson(
         "\"" + Path.Combine(appRoot, "scripts", "update-cli.js") + "\" apply",
         true
       );
-      AppendLog(applyJson);
       bool updated = ExtractJsonRaw(applyJson, "updated") == "true";
       if (updated) {
-        AppendLog("Перезапуск...");
         SetStatus("Перезапуск", "run");
-        // Закрываем сразу: фоновый скрипт дождётся выхода, подменит exe и откроет приложение снова.
         BeginInvoke(new Action(() => Application.Exit()));
         return;
       }
       SetStatus("Актуально", "ok");
       MessageBox.Show(this, "Обновление установлено. Можно продолжать работу.", "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Information);
     } catch (Exception ex) {
-      AppendLog("Ошибка обновления: " + ex.Message);
       if (interactive) MessageBox.Show(this, ex.Message, "Обновления", MessageBoxButtons.OK, MessageBoxIcon.Error);
     } finally {
       updateBtn.Enabled = true;
@@ -557,10 +631,6 @@ public class DealCheckerForm : Form {
       string stdout = p.StandardOutput.ReadToEnd();
       string stderr = p.StandardError.ReadToEnd();
       p.WaitForExit();
-      if (!string.IsNullOrWhiteSpace(stderr)) {
-        foreach (var line in stderr.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-          AppendLog(line);
-      }
       if (p.ExitCode != 0 && string.IsNullOrWhiteSpace(stdout)) throw new Exception(stderr);
       return stdout.Trim();
     });
