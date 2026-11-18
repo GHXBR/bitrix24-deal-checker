@@ -11,6 +11,7 @@
  *
  * Лента:
  *   .crm-entity-stream-section / .crm-timeline__card-wrapper
+ *   догружаем до «Создана сделка» (низ), обход задач снизу вверх
  */
 
 const config = require('../config');
@@ -317,8 +318,9 @@ async function waitForTimelineReady(frame, timeoutMs = 12000) {
         const n = document.querySelectorAll(
           '.crm-entity-stream-section, .crm-timeline__card-wrapper'
         ).length;
-        const t = (document.body?.innerText || '').toLowerCase();
+        const t = (document.body?.innerText || '').toLowerCase().replace(/ё/g, 'е');
         const markers =
+          t.includes('создана сделка') ||
           t.includes('счет заказчику') ||
           t.includes('счёт заказчику') ||
           t.includes('предоплата') ||
@@ -327,11 +329,7 @@ async function waitForTimelineReady(frame, timeoutMs = 12000) {
           t.includes('задача');
         return { n, markers };
       });
-      if (state.markers) return true;
-      if (state.n >= 2) {
-        // есть секции, но маркеров ещё нет — подскроллим и проверим снова на следующем круге
-        await scrollTimelineInFrame(frame, 1);
-      }
+      if (state.markers || state.n >= 2) return true;
       return false;
     },
     { timeoutMs, intervalMs: 200, label: 'timeline' }
@@ -553,9 +551,10 @@ async function findPaymentTasksInFrame(frame, hints, dealName, options = {}) {
       const name = norm(dealName);
       const tasks = [];
 
+      // снизу вверх: внизу «Создана сделка», выше — задачи/счета по хронологии
       const sections = Array.from(
         document.querySelectorAll('.crm-entity-stream-section, .crm-timeline__card-wrapper')
-      );
+      ).reverse();
 
       for (const section of sections) {
         const text = (section.innerText || '').replace(/\s+/g, ' ').trim();
@@ -713,39 +712,136 @@ async function readTimelineComments(frame) {
   });
 }
 
-async function scrollTimelineInFrame(frame, steps = 4) {
-  await frame
-    .evaluate(async (scrollSteps) => {
+/**
+ * Догружает ленту до самого низа — пункта «Создана сделка».
+ * Раньше хватало 2–4 подскролла и early-stop на «предоплата», из‑за этого
+ * старые счета/задачи ниже по ленте не попадали в DOM.
+ */
+async function scrollTimelineInFrame(frame, steps = 20) {
+  return frame
+    .evaluate(async (maxSteps) => {
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const stream =
         document.querySelector('.crm-entity-stream-container') ||
-        document.querySelector('[class*="stream"]') ||
+        document.querySelector('.crm-entity-stream-content') ||
+        document.querySelector('[class*="entity-stream"]') ||
+        document.querySelector('[class*="stream-container"]') ||
         document.scrollingElement;
 
-      const hasMarkers = () => {
-        const t = (document.body?.innerText || '').toLowerCase();
-        return (
-          t.includes('счет заказчику') ||
-          t.includes('счёт заказчику') ||
-          t.includes('предоплата') ||
-          t.includes('постоплата') ||
-          t.includes('списание')
+      const pageText = () =>
+        String(document.body?.innerText || '')
+          .toLowerCase()
+          .replace(/ё/g, 'е');
+
+      const hasDealCreated = () => {
+        if (/создана\s+сделка/.test(pageText())) return true;
+        const nodes = document.querySelectorAll(
+          '.crm-entity-stream-section, .crm-timeline__card-wrapper, .crm-timeline__card'
         );
+        for (const el of nodes) {
+          const t = String(el.innerText || '')
+            .toLowerCase()
+            .replace(/ё/g, 'е');
+          if (/создана\s+сделка/.test(t)) return true;
+        }
+        return false;
       };
 
-      for (let i = 0; i < scrollSteps; i++) {
-        if (stream) stream.scrollTop = (stream.scrollTop || 0) + 1200;
-        window.scrollBy(0, 1200);
-        await sleep(80);
-        // если ключевые блоки уже видны — не крутим дальше
-        if (i >= 1 && hasMarkers()) break;
+      const clickLoadMore = () => {
+        const candidates = [
+          ...document.querySelectorAll(
+            '.crm-entity-stream-section-load-more, .crm-entity-stream-load-more, [class*="stream"] [class*="load-more"], button, a, span'
+          ),
+        ];
+        for (const el of candidates) {
+          const t = String(el.textContent || '')
+            .toLowerCase()
+            .replace(/ё/g, 'е')
+            .trim();
+          if (
+            t === 'ещё' ||
+            t === 'еще' ||
+            t.includes('загрузить ещё') ||
+            t.includes('загрузить еще') ||
+            t.includes('показать ещё') ||
+            t.includes('показать еще') ||
+            (el.className && /load-more/i.test(String(el.className)))
+          ) {
+            try {
+              el.click();
+              return true;
+            } catch {
+              // ignore
+            }
+          }
+        }
+        return false;
+      };
+
+      const scrollDown = () => {
+        if (stream) {
+          const prev = stream.scrollTop || 0;
+          stream.scrollTop = prev + 1400;
+          if (stream.scrollTop === prev) {
+            stream.scrollTop = stream.scrollHeight || prev + 1400;
+          }
+        }
+        window.scrollBy(0, 1400);
+      };
+
+      let stable = 0;
+      let lastCount = document.querySelectorAll(
+        '.crm-entity-stream-section, .crm-timeline__card-wrapper'
+      ).length;
+
+      for (let i = 0; i < maxSteps; i++) {
+        if (hasDealCreated()) break;
+
+        clickLoadMore();
+        scrollDown();
+        await sleep(180);
+
+        const count = document.querySelectorAll(
+          '.crm-entity-stream-section, .crm-timeline__card-wrapper'
+        ).length;
+        if (count <= lastCount) {
+          stable += 1;
+          // ещё раз жмём «ещё» — иногда кнопка появляется только у низа
+          if (clickLoadMore()) {
+            await sleep(220);
+            stable = 0;
+          } else if (stable >= 3) {
+            break;
+          }
+        } else {
+          stable = 0;
+          lastCount = count;
+        }
       }
-      const more = document.querySelector('.crm-entity-stream-section-load-more');
-      if (more) more.click();
-      await sleep(100);
-      window.scrollTo(0, 0);
+
+      // якорим низ («Создана сделка»), затем чуть поднимаемся — все секции уже в DOM
+      if (stream) stream.scrollTop = stream.scrollHeight || stream.scrollTop;
+      window.scrollTo(0, document.body?.scrollHeight || 0);
+      await sleep(120);
+
+      const created = [...document.querySelectorAll(
+        '.crm-entity-stream-section, .crm-timeline__card-wrapper, .crm-timeline__card'
+      )].find((el) =>
+        /создана\s+сделка/i.test(String(el.innerText || '').replace(/ё/g, 'е'))
+      );
+      if (created && typeof created.scrollIntoView === 'function') {
+        created.scrollIntoView({ block: 'end', inline: 'nearest' });
+        await sleep(80);
+      }
+
+      return {
+        loadedToCreated: hasDealCreated(),
+        sections: document.querySelectorAll(
+          '.crm-entity-stream-section, .crm-timeline__card-wrapper'
+        ).length,
+      };
     }, steps)
-    .catch(() => {});
+    .catch(() => ({ loadedToCreated: false, sections: 0 }));
 }
 
 async function dumpFrameDiagnostics(frame) {

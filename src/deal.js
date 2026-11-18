@@ -129,9 +129,17 @@ async function checkDeal(page, deal, { previousDealId = '' } = {}) {
       return result;
     }
 
-    logStep('таймлайн', 'жду ленту...');
+    logStep('таймлайн', 'жду ленту и догружаю до «Создана сделка»...');
     await waitForTimelineReady(dealFrame, config.timelineTimeoutMs || 12000);
-    await scrollTimelineInFrame(dealFrame, config.timelineScrollSteps || 4);
+    const timelineLoad = await scrollTimelineInFrame(
+      dealFrame,
+      config.timelineScrollSteps || 20
+    );
+    log(
+      `  лента: секций=${timelineLoad?.sections ?? '—'}, до «Создана сделка»=${
+        timelineLoad?.loadedToCreated ? 'да' : 'нет'
+      }`
+    );
 
     const wantDiag =
       config.verbose || process.env.DEBUG_DIAG === '1' || process.env.VERBOSE === '1';

@@ -36,7 +36,7 @@ function isGuiMode() {
 async function main() {
   const guiMode = isGuiMode();
   info('Проверка сделок Битрикс24 (только чтение, ничего не меняет)');
-  info('Сборка: 2026-11-11q (списание: новый UI описания; цена=сумма при 1 шт; суммы 3 000)');
+  info('Сборка: 2026-11-18a (лента до «Создана сделка»; задачи снизу вверх)');
   if (config.verbose) info('Подробные логи включены (config.verbose / VERBOSE=1)');
 
   let reportUrl = readReportUrlFromArgs();

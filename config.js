@@ -11,8 +11,8 @@ module.exports = {
   // пауза не нужна: между сделками ждём закрытия slider по условию
   delayBetweenDealsMs: 0,
   reportWaitMs: 120_000,
-  // на Windows лента догружается тяжелее — меньше лишних скроллов
-  timelineScrollSteps: isWin ? 2 : 4,
+  // догружаем ленту до «Создана сделка» (снизу); лимит шагов — защита от бесконечного скролла
+  timelineScrollSteps: isWin ? 24 : 30,
 
   /**
    * Скорость (особенно Windows):
